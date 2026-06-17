@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.11.0
+// @version      0.12.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -79,28 +79,48 @@
     }
     return changed;
   }
+  // Durable mirror in the PAGE's localStorage (youtube.com origin), alongside GM storage. Two reasons:
+  // (1) it belongs to the origin, not the script, so it survives the userscript manager resetting the
+  //     script's GM values on an edit/update;
+  // (2) crucially, an OLD version of this script left running in another tab rewrites the GM blob in its
+  //     own (older) format and silently strips fields it doesn't know — e.g. pre-v0.10.0 has no `c`, so
+  //     its flush regressed clicked entries to c:0 (kept f/l/t/d). Old versions have NO localStorage
+  //     code, so they never touch this mirror; on load we merge it back and re-seed GM, healing the loss.
+  // localStorage's `storage` event is also reliable cross-tab on Firefox/LibreWolf, unlike GM's listener.
+  function lsGet() { try { return localStorage.getItem(STORE_KEY) || '{}'; } catch (e) { return '{}'; } }
+  function lsSet(s) { try { localStorage.setItem(STORE_KEY, s); } catch (e) {} }
   function loadStore() {
     watched = parseStore(GM_getValue(STORE_KEY, '{}'));
+    const healed = mergeInto(parseStore(lsGet()));         // fold in the mirror (may out-live a stripped GM copy)
+    if (healed) { dirty = true; flush(); }                 // re-seed GM from the survivor copy
   }
   function flush() {
     if (!dirty) return;
-    // Read-merge-write: fold in whatever is in storage *now* before overwriting, so a stale
-    // in-memory copy (e.g. another tab wrote while this one had the page open) can never clobber
-    // entries this tab never saw. The whole map lives under one key, so a blind write would do exactly
-    // that. Monotonic max keeps the higher fraction on every conflict.
+    // Read-merge-write: fold in whatever is in storage *now* before overwriting, so a stale in-memory
+    // copy (e.g. another tab wrote while this one had the page open) can never clobber entries this tab
+    // never saw. The whole map lives under one key, so a blind write would do exactly that. Merge BOTH
+    // backends; monotonic max / sticky-OR keep the stronger value on every conflict.
     mergeInto(parseStore(GM_getValue(STORE_KEY, '{}')));
-    GM_setValue(STORE_KEY, JSON.stringify(watched));
+    mergeInto(parseStore(lsGet()));
+    const s = JSON.stringify(watched);
+    GM_setValue(STORE_KEY, s);
+    lsSet(s);
     dirty = false;
   }
   // Live cross-tab sync: when another tab persists progress, fold it into this tab's map and redraw,
   // so an already-open page (e.g. Subscriptions) updates without a manual reload. Firefox/LibreWolf
   // don't reliably propagate GM storage to other open tabs otherwise — a plain reload there can read
-  // a stale copy, which is why a freshly-watched video failed to show up across tabs.
+  // a stale copy, which is why a freshly-watched video failed to show up across tabs. The localStorage
+  // `storage` event covers what GM's listener misses there.
   function watchStore() {
-    if (typeof GM_addValueChangeListener !== 'function') return;
-    GM_addValueChangeListener(STORE_KEY, (key, oldVal, newVal, remote) => {
-      if (!remote) return;                                 // ignore our own writes
-      if (mergeInto(parseStore(newVal))) scheduleSweep();
+    if (typeof GM_addValueChangeListener === 'function') {
+      GM_addValueChangeListener(STORE_KEY, (key, oldVal, newVal, remote) => {
+        if (!remote) return;                               // ignore our own writes
+        if (mergeInto(parseStore(newVal))) scheduleSweep();
+      });
+    }
+    window.addEventListener('storage', e => {              // localStorage changed in another tab
+      if (e.key === STORE_KEY && e.newValue && mergeInto(parseStore(e.newValue))) scheduleSweep();
     });
   }
   // Throttle, NOT debounce. A debounce here (clear + reset on every call) gets STARVED during
@@ -253,7 +273,7 @@
   // clipped to the rounded interior, so its left end is rounded and its right end is cut flat at the
   // fill point — the usual progress-bar look. clip-path needs a document-unique id (counter below).
   const BAR_W = 44, BAR_H = 14, BAR_SW = 2;  // viewBox units; on-screen size set by `size` (= height)
-  const OUTLINE_CLICKED = 0.75, OUTLINE_UNCLICKED = 0.2;  // outline opacity: brighter once clicked, dim until then
+  const OUTLINE_CLICKED = 0.75, OUTLINE_UNCLICKED = 0.25;  // outline opacity: brighter once clicked, dim until then
   let clipSeq = 0;
   function buildIcon(frac, size = ICON_SIZE, clicked = true) {
     const svg = svgChild('svg', {
@@ -566,7 +586,7 @@
   GM_registerMenuCommand('Reset all watched data', () => {
     if (confirm('Erase all locally-stored watched data for this script?')) {
       // Write empty directly — flush() does a read-merge-write and would fold the old data right back.
-      watched = {}; dirty = false; GM_setValue(STORE_KEY, '{}'); scheduleSweep();
+      watched = {}; dirty = false; GM_setValue(STORE_KEY, '{}'); lsSet('{}'); scheduleSweep();
     }
   });
 })();

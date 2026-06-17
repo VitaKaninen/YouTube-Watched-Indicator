@@ -71,8 +71,24 @@ later" tabs and forgets which they've already opened.
 - **Listen on `window` capture, not `document`** — capture order is window → document → target, so a
   window-capture handler fires before any page/extension handler on `document` (e.g. the user's
   "open in new tab" script) that might `stopImmediatePropagation` and prevent us from seeing the click.
-- Storage itself never regresses `c` (read-merge-write OR-merges it; only Reset writes `{}`), so a lost
-  click was always a missed *write*, never a clobber.
+- Within one script version storage never regresses `c` (read-merge-write OR-merges it; only Reset
+  writes `{}`). The real-world regression we hit (v0.12.0) came from **a stale OLD-version tab** — see
+  the durable-mirror gotcha below.
+
+**Stale-tab field-stripping + durable localStorage mirror (v0.12.0):** symptom was a clicked entry
+losing only `c` (`{f,l,t,d}` intact, `c:1`→`c:0`) with no edit, after a wait+reload. Cause: the user
+keeps many tabs open; a tab still running a **pre-`c` version (≤v0.9.0)** rewrites the whole single-key
+GM blob in its older format on its next flush, silently dropping fields it doesn't know (`c`). Any
+writer that doesn't OR-merge a field will strip it — this recurs whenever a new field is added and an
+old tab lingers (every `@version` bump leaves old tabs running until reloaded). Operational fix: close
+all YouTube tabs and reopen. Code fix: **mirror the map into the page's `localStorage`** (`lsGet`/`lsSet`,
+same `STORE_KEY`) alongside GM storage. It belongs to the youtube.com **origin, not the script**, so (a)
+it survives the userscript manager resetting GM values on edit, and (b) old script versions have no
+localStorage code so they never strip it — `loadStore()` merges it back and re-seeds GM (`healed`),
+healing a stripped GM copy. `flush()` writes both backends (merging both first); Reset clears both; a
+`window` `'storage'` event folds in cross-tab changes (reliable on Firefox/LibreWolf, unlike GM's
+listener). Caveat: only protects values written by ≥v0.12.0 — data already stripped before the mirror
+existed is gone.
 
 ## Gotchas (verified live 2026-06-16)
 
