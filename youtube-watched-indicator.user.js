@@ -3,13 +3,15 @@
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
 // @version      0.1.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. Empty / half / full circle = unseen / partially / fully watched.
-// @author       azrobbins
+// @author       VitaKaninen
 // @match        https://www.youtube.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
 // @run-at       document-idle
 // @noframes
+// @updateURL    https://raw.githubusercontent.com/VitaKaninen/YouTube-Watched-Indicator/native-mode/youtube-watched-indicator.user.js
+// @downloadURL  https://raw.githubusercontent.com/VitaKaninen/YouTube-Watched-Indicator/native-mode/youtube-watched-indicator.user.js
 // ==/UserScript==
 
 (function () {
@@ -24,7 +26,9 @@
   const SWEEP_MS       = 200;                // debounce before re-decorating after DOM changes
   const T_PARTIAL      = 0.05;               // >= this fraction -> "half" (red)
   const T_FULL         = 0.85;               // >  this fraction -> "full" (green)
-  const GUTTER_OFFSET  = 20;                 // px the badge sits left of the metadata row (the empty gutter)
+  const ICON_SIZE      = 22;                 // px icon size
+  const AVATAR_GAP     = 16;                 // px gap below the channel avatar (grid cards)
+  const GUTTER_OFFSET  = 20;                 // px left of the metadata row (fallback for list cards, e.g. search)
 
   // ---------------------------------------------------------------------------
   // Storage  (in-memory map, debounced flush; monotonic max-fraction per video)
@@ -97,7 +101,7 @@
     return el;
   }
   function buildIcon(state) {
-    const svg = svgChild('svg', { viewBox: '0 0 16 16', width: '14', height: '14' });
+    const svg = svgChild('svg', { viewBox: '0 0 16 16', width: ICON_SIZE, height: ICON_SIZE });
     svg.style.display = 'block';
     if (state === 'full') {
       svg.appendChild(svgChild('circle', { cx: 8, cy: 8, r: 7, fill: '#2ba640' }));
@@ -131,7 +135,29 @@
     return null;
   }
 
-  function placeBadge(row, badge) {
+  // Grid-style cards have a channel avatar with empty gutter beneath it. Anchoring under the avatar
+  // keeps the icon's vertical position fixed no matter how many lines the title wraps to.
+  function avatarOf(card) {
+    if (card.matches('yt-lockup-view-model, ytd-rich-item-renderer, ytd-rich-grid-media')) {
+      return card.querySelector('yt-decorated-avatar-view-model, yt-img-shadow#avatar, #avatar');
+    }
+    return null;  // list-style cards (e.g. search results) -> fall back to the metadata-row gutter
+  }
+  function placeUnderAvatar(avatar, badge) {
+    if (getComputedStyle(avatar).position === 'static') avatar.style.position = 'relative';
+    Object.assign(badge.style, {
+      position: 'absolute',
+      left: '50%',
+      top: '100%',
+      transform: `translate(-50%, ${AVATAR_GAP}px)`,
+      pointerEvents: 'none',
+      lineHeight: '0',
+      color: 'inherit',
+      zIndex: '1'
+    });
+    avatar.appendChild(badge);
+  }
+  function placeInGutter(row, badge) {
     if (getComputedStyle(row).position === 'static') row.style.position = 'relative';
     Object.assign(badge.style, {
       position: 'absolute',
@@ -153,11 +179,18 @@
     const id = idFromCard(card);
     if (!id) return;
 
-    let badge = row.querySelector(':scope > .ywi-badge');
+    let badge = card.querySelector('.ywi-badge');
     if (!badge) {
       badge = document.createElement('span');
       badge.className = 'ywi-badge';
-      placeBadge(row, badge);
+      const avatar = avatarOf(card);
+      if (avatar) placeUnderAvatar(avatar, badge);
+      else placeInGutter(row, badge);
+      // Pin the ring color to the card's metadata-text color. Otherwise currentColor inherits
+      // from the anchor element — black inside the avatar — and the empty/half ring vanishes
+      // against a dark background. Reading the live text color adapts to light/dark theme.
+      const textEl = row.querySelector('.ytContentMetadataViewModelMetadataText, span') || row;
+      badge.style.color = getComputedStyle(textEl).color;
     }
     const frac = watched[id] || 0;
     const state = stateFor(frac);

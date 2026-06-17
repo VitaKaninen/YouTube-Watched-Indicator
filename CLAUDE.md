@@ -34,15 +34,32 @@ Data model: `{ videoId: maxFraction }` (0..1), monotonic — only ever takes the
 - **Ads share the player element**: during ads `currentTime/duration` refer to the *ad*. Skip
   sampling when `#movie_player` / `.html5-video-player` has the `ad-showing` class.
 - **Live streams**: `duration` is `Infinity` — guard against non-finite duration.
-- **Icon placement**: badge is `position:absolute; left:-20px` in the metadata row's left gutter so
-  it sits left of the view count **without reflowing it** (the row is set `position:relative`).
-  `GUTTER_OFFSET` is tunable.
+- **Icon placement**: on grid cards the badge is anchored **under the channel avatar**
+  (`yt-decorated-avatar-view-model`), centered, `top:100%` + `AVATAR_GAP`px. The avatar's position is
+  fixed regardless of title wrap, so the icon no longer drifts when a title spans two lines (an
+  earlier version anchored to the views row and *did* drift). List-style cards without a usable
+  avatar (e.g. search results) fall back to `placeInGutter` (`left:-GUTTER_OFFSET` of the metadata
+  row). Tunables: `ICON_SIZE`, `AVATAR_GAP`, `GUTTER_OFFSET`.
+- **Icon color / `currentColor`**: the empty + half rings use `currentColor`. Inside
+  `yt-decorated-avatar-view-model` that inherits **black** (`rgb(0,0,0)`) → invisible on dark theme.
+  Fix: at decorate time set `badge.style.color` to the card's metadata-text computed color
+  (`.ytContentMetadataViewModelMetadataText`, ~`rgb(170,170,170)` on dark) — adapts to theme.
+  Note `--yt-spec-text-secondary` reads **empty** at `:root` here, so don't rely on it.
 - **False positives**: non-video metadata rows (e.g. the channel header's subscriber line) are also
   `yt-content-metadata-view-model`. The `idFromCard` guard (requires a `/watch` or `/shorts/` link)
   rejects them — don't decorate a row without a resolvable video ID.
 - **Selectors drift**: YouTube renames polymer elements / class hashes periodically. The capture/
   decorate selectors are the brittle part and will need occasional maintenance. Re-inspect live
   rather than guessing from memory.
+
+## Install gotcha (Chrome MV3)
+
+Recent Chrome (MV3) requires a per-extension **"Allow user scripts"** toggle before Tampermonkey can
+inject *any* userscript. Symptom: the script shows **Enabled** in the Tampermonkey popup but the
+toolbar icon has **no "1" badge** and nothing runs (no console error either). Tampermonkey shows a
+banner "Please enable the `Allow User Scripts` extension setting." Fix: `chrome://extensions` →
+Tampermonkey → **Details** → enable **Allow user scripts** (older Chrome: enable Developer mode),
+then reload the page. Must be done in the *same profile* the script lives in.
 
 ## Status
 
