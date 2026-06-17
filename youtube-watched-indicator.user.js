@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.13.0
+// @version      0.14.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -471,7 +471,7 @@
     const wrap = document.createElement('div');
     wrap.id = WATCHBAR_ID;
     Object.assign(wrap.style, {
-      position: 'relative', margin: '10px 0 6px', maxWidth: WATCHBAR_MAXW + 'px', userSelect: 'none'
+      position: 'relative', margin: '0 0 6px', maxWidth: WATCHBAR_MAXW + 'px', userSelect: 'none'
     });
 
     const track = document.createElement('div');
@@ -516,8 +516,8 @@
     if (!anchor) return;
     let wrap = document.getElementById(WATCHBAR_ID);
     if (!wrap) wrap = buildWatchBar();
-    if (wrap.parentNode !== anchor) {                    // (re)attach at the very TOP, just under the player
-      anchor.insertBefore(wrap, anchor.firstChild);      // above the title so it stays on-screen when scrolled to top
+    if (wrap.parentNode !== anchor) {                    // (re)attach below the title, above the channel row
+      anchor.insertBefore(wrap, anchor.querySelector('#bottom-row') || anchor.firstChild);
     }
     const frac = fracOf(id), last = lastOf(id), dur = durOf(id);
     const { fill, marker } = wrap._ywi;
