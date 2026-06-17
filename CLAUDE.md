@@ -46,8 +46,10 @@ Two features ride on `d`:
   original value) the hover passes through to the thumbnail, which starts the video preview and the
   tooltip never shows. Shorts already worked because `placeBesideViews` never set `none`; the grid
   (`placeUnderAvatar`) and list (`placeInGutter`) placements did and were flipped to `auto`.
-- **Watch-page resume bar (`/watch` only)** — `updateWatchBar()` injects a clickable `<div>` bar under
-  the title (anchored in `ytd-watch-metadata #above-the-fold`, before `#bottom-row`; capped at
+- **Watch-page resume bar (`/watch` only)** — `updateWatchBar()` injects a clickable `<div>` bar at the
+  **top** of `ytd-watch-metadata #above-the-fold` (inserted before `firstChild`, i.e. **above** the
+  title, just under the player — v0.13.0 moved it up from before `#bottom-row`, where the tall player
+  pushed it below the fold when scrolled to the top); capped at
   `WATCHBAR_MAXW`=360px — full column width was "too wide"). Green fill = **furthest** position (`f`);
   white marker = **last** position (`l`, ≤ `f`). **It is deliberately NOT a scrub bar:** clicking
   *anywhere* jumps to the LAST position (`video.currentTime = lastOf(id) * d`), never to the click point
