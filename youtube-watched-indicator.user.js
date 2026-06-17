@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.7.0
-// @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; on the watch page the bar is clickable to seek/resume in place.
+// @version      0.8.0
+// @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; on the watch page a bar shows your last recorded position and click it to resume there in place.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
 // @grant        GM_setValue
@@ -302,8 +302,8 @@
       left: '50%',
       top: '100%',
       transform: `translate(-50%, ${AVATAR_GAP}px)`,
-      pointerEvents: 'none',
-      lineHeight: '0',
+      pointerEvents: 'auto',          // so the badge itself receives hover -> its title tooltip shows
+      lineHeight: '0',                // (none would pass the hover to the thumbnail, starting the preview)
       color: 'inherit',
       zIndex: '1'
     });
@@ -316,7 +316,7 @@
       left: `-${GUTTER_OFFSET}px`,
       top: '50%',
       transform: 'translateY(-50%)',
-      pointerEvents: 'none',
+      pointerEvents: 'auto',          // receive hover so the title tooltip shows
       lineHeight: '0',
       color: 'inherit'
     });
@@ -413,15 +413,16 @@
 
   // ---------------------------------------------------------------------------
   // Watch-page resume bar  (only on /watch)
-  // A wider, clickable copy of the thumbnail bar injected under the video title. The FILL shows how
-  // far you'd reached (your stored max) with a marker at that point; CLICKING anywhere seeks the
-  // player to that fraction — so clicking the marker resumes where you left off, clicking elsewhere
-  // scrubs. It sets video.currentTime directly, which seeks IN PLACE (no page reload, unlike a ?t=
-  // URL). A live label under the cursor shows the timestamp you'd jump to. Built from <div>s (not SVG)
-  // so it stretches responsively with rounded ends; all via createElement (Trusted Types blocks
-  // innerHTML). Useful for getting back to your spot after a crash reset the player position.
+  // A clickable copy of the thumbnail bar injected under the video title. The FILL shows how far you'd
+  // reached (your stored max), with a marker at that point. CLICKING anywhere on the bar jumps the
+  // player to that recorded position — NOT to where you clicked (deliberately not a scrub bar: clicking
+  // a different spot must never overwrite your saved position). It sets video.currentTime directly,
+  // which seeks IN PLACE (no page reload, unlike a ?t= URL). Built from <div>s (not SVG) so it stretches
+  // with rounded ends; all via createElement (Trusted Types blocks innerHTML). Useful for getting back
+  // to your spot after a crash reset the player position.
   // ---------------------------------------------------------------------------
-  const WATCHBAR_ID = 'ywi-watchbar';
+  const WATCHBAR_ID    = 'ywi-watchbar';
+  const WATCHBAR_MAXW  = 360;                            // px max width of the resume bar
   function watchAnchor() {
     return document.querySelector('ytd-watch-metadata #above-the-fold')
         || document.querySelector('ytd-watch-metadata')
@@ -430,7 +431,9 @@
   function buildWatchBar() {
     const wrap = document.createElement('div');
     wrap.id = WATCHBAR_ID;
-    Object.assign(wrap.style, { position: 'relative', margin: '10px 0 6px', userSelect: 'none' });
+    Object.assign(wrap.style, {
+      position: 'relative', margin: '10px 0 6px', maxWidth: WATCHBAR_MAXW + 'px', userSelect: 'none'
+    });
 
     const track = document.createElement('div');
     Object.assign(track.style, {
@@ -448,38 +451,16 @@
       background: 'var(--yt-spec-text-primary, #fff)', transform: 'translateX(-1px)',
       pointerEvents: 'none', display: 'none'
     });
-    const label = document.createElement('div');
-    Object.assign(label.style, {
-      position: 'absolute', bottom: '18px', padding: '2px 6px', borderRadius: '4px',
-      font: '12px/1.4 Roboto, Arial, sans-serif', whiteSpace: 'nowrap', pointerEvents: 'none',
-      background: 'rgba(0,0,0,0.85)', color: '#fff', transform: 'translateX(-50%)',
-      display: 'none', zIndex: '10'
-    });
-    wrap.append(track, marker, label);
+    wrap.append(track, marker);
 
-    const fracAt = clientX => {
-      const r = track.getBoundingClientRect();
-      return r.width ? Math.max(0, Math.min(1, (clientX - r.left) / r.width)) : 0;
-    };
-    const durNow = () => {
+    // Click ANYWHERE -> jump to the recorded position (not the click point), so a stray click can't
+    // move (and thus overwrite) your saved spot. Reads the stored fraction fresh at click time.
+    track.addEventListener('click', () => {
       const v = mainVideo();
-      if (v && isFinite(v.duration) && v.duration > 0) return v.duration;
-      return durOf(currentVideoId());                    // fall back to the stored duration
-    };
-    track.addEventListener('click', e => {
-      const v = mainVideo(), d = durNow();
-      if (!v || !d) return;
-      v.currentTime = fracAt(e.clientX) * d;             // seek in place — no reload
+      const d = (v && isFinite(v.duration) && v.duration > 0) ? v.duration : durOf(currentVideoId());
+      const f = fracOf(currentVideoId());
+      if (v && d && f > 0) v.currentTime = f * d;        // seek in place — no reload
     });
-    const onMove = e => {
-      const f = fracAt(e.clientX), d = durNow();
-      label.style.display = 'block';
-      label.style.left = (f * 100) + '%';
-      label.textContent = d ? fmtTime(f * d) : (Math.round(f * 100) + '%');
-    };
-    track.addEventListener('mousemove', onMove);
-    track.addEventListener('mouseenter', onMove);
-    track.addEventListener('mouseleave', () => { label.style.display = 'none'; });
 
     wrap._ywi = { fill, marker };
     return wrap;
@@ -506,8 +487,8 @@
     if (frac > 0) { marker.style.display = 'block'; marker.style.left = (frac * 100) + '%'; }
     else marker.style.display = 'none';
     wrap.title = frac > 0
-      ? `You reached ${Math.round(frac * 100)}%${dur ? ' / ' + fmtTime(frac * dur) : ''} — click to seek`
-      : 'Click to seek';
+      ? `Click to resume at ${Math.round(frac * 100)}%${dur ? ' / ' + fmtTime(frac * dur) : ''}`
+      : 'No recorded position yet';
   }
 
   // ---------------------------------------------------------------------------

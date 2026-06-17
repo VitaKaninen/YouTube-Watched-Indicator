@@ -32,13 +32,19 @@ is normalized to objects in `parseStore()`.
 
 Two features ride on `d`:
 - **Hover timestamp** — the thumbnail bar's `title` shows `57% / 4:40` (percentage + the position you'd
-  reached = `f * d`), via `fmtTime()`. Falls back to `NN% watched` when `d` is unknown.
-- **Watch-page resume bar (`/watch` only)** — `updateWatchBar()` injects a wider, clickable `<div>` bar
-  under the title (anchored in `ytd-watch-metadata #above-the-fold`, before `#bottom-row`). Fill = stored
-  max with a marker at that point; **clicking seeks the player in place** (`video.currentTime = f * d`,
-  **no reload** — the point of it vs. a `?t=` URL), and a cursor label shows the target timestamp. Built
-  from divs (not SVG) so it stretches responsively with rounded ends. Wired from `sweep()` + the
-  `SAMPLE_MS` interval; removes itself when off `/watch`.
+  reached = `f * d`), via `fmtTime()`. Falls back to `NN% watched` when `d` is unknown. **Gotcha:** the
+  badge must be `pointer-events: auto` for the native `title` tooltip to appear — with `none` (the
+  original value) the hover passes through to the thumbnail, which starts the video preview and the
+  tooltip never shows. Shorts already worked because `placeBesideViews` never set `none`; the grid
+  (`placeUnderAvatar`) and list (`placeInGutter`) placements did and were flipped to `auto`.
+- **Watch-page resume bar (`/watch` only)** — `updateWatchBar()` injects a clickable `<div>` bar under
+  the title (anchored in `ytd-watch-metadata #above-the-fold`, before `#bottom-row`; capped at
+  `WATCHBAR_MAXW`=360px — full column width was "too wide"). Fill = stored max with a marker at that
+  point. **It is deliberately NOT a scrub bar:** clicking *anywhere* jumps to the recorded position
+  (`video.currentTime = fracOf(id) * d`), never to the click point — clicking elsewhere must not move
+  (and thus overwrite, via `record()`) your saved spot. Seeks **in place, no reload** (the point of it
+  vs. a `?t=` URL). Built from divs (not SVG) so it stretches with rounded ends. Wired from `sweep()` +
+  the `SAMPLE_MS` interval; removes itself when off `/watch`.
 
 ## Gotchas (verified live 2026-06-16)
 
