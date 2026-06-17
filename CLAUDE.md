@@ -55,14 +55,24 @@ Two features ride on `d`:
   place, no reload** (the point of it vs. a `?t=` URL). Built from divs (not SVG) so it stretches with
   rounded ends. Wired from `sweep()` + the `SAMPLE_MS` interval; removes itself when off `/watch`.
 
-**Click tracking (`c`):** a capture-phase `click`/`auxclick`/`contextmenu` listener on `document`
-(`markClicked` / `idFromClick`) marks a video opened the instant you click its card on a listing —
-covering left-click, middle-click, and right-click→open-in-new-tab. Captured **on the listing page**,
-so it works even though the user's setup opens videos in deferred/lazy-loaded tabs that never run the
-script (the whole point — the new tab needn't load for the mark to stick). The empty bar's outline is
-dim (`OUTLINE_UNCLICKED`=0.3 opacity) until clicked, then brighter (`OUTLINE_CLICKED`=0.75); a watched
-video (`f>0`) counts as clicked regardless. Opacity (not a hardcoded gray) so it adapts to theme.
-Purpose: the user opens many "watch later" tabs and forgets which they've already opened.
+**Click tracking (`c`):** a capture-phase `click`/`auxclick`/`contextmenu` listener (`markClicked` /
+`idFromClick`) marks a video opened the instant you click its card on a listing — covering left-click,
+middle-click, and right-click→open-in-new-tab. Captured **on the listing page**, so it works even though
+the user's setup opens videos in deferred/lazy-loaded tabs that never run the script (the whole point —
+the new tab needn't load for the mark to stick). The empty bar's outline is dim (`OUTLINE_UNCLICKED`
+opacity) until clicked, then brighter (`OUTLINE_CLICKED`); a watched video (`f>0`) counts as clicked
+regardless. Opacity (not a hardcoded gray) so it adapts to theme. Purpose: the user opens many "watch
+later" tabs and forgets which they've already opened.
+
+**Click-persistence gotchas (v0.11.0 fix — clicked outlines vanished on reload):**
+- **Flush IMMEDIATELY on click, not via `scheduleFlush`** — unlike playback (continuous, throttled), a
+  click is a one-shot event and the page often navigates / reloads / spawns a new tab right after, so a
+  1.5s deferred flush gets lost in that window before it persists. `markClicked` calls `flush()` directly.
+- **Listen on `window` capture, not `document`** — capture order is window → document → target, so a
+  window-capture handler fires before any page/extension handler on `document` (e.g. the user's
+  "open in new tab" script) that might `stopImmediatePropagation` and prevent us from seeing the click.
+- Storage itself never regresses `c` (read-merge-write OR-merges it; only Reset writes `{}`), so a lost
+  click was always a missed *write*, never a clobber.
 
 ## Gotchas (verified live 2026-06-16)
 

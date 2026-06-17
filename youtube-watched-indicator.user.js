@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.10.0
+// @version      0.11.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -113,7 +113,7 @@
   }
   function record(id, frac, dur) {
     if (!id || !(frac > 0)) return;
-    const e = watched[id] || (watched[id] = { f: 0, l: 0, t: 0, d: 0 });
+    const e = watched[id] || (watched[id] = { f: 0, l: 0, t: 0, d: 0, c: 0 });
     const r = Math.round(frac * 1000) / 1000;             // 0.001 precision is plenty
     let changed = false;
     if (r > e.f) {                                         // furthest: monotonic high-water mark
@@ -253,7 +253,7 @@
   // clipped to the rounded interior, so its left end is rounded and its right end is cut flat at the
   // fill point — the usual progress-bar look. clip-path needs a document-unique id (counter below).
   const BAR_W = 44, BAR_H = 14, BAR_SW = 2;  // viewBox units; on-screen size set by `size` (= height)
-  const OUTLINE_CLICKED = 0.75, OUTLINE_UNCLICKED = 0.3;  // outline opacity: brighter once clicked, dim until then
+  const OUTLINE_CLICKED = 0.75, OUTLINE_UNCLICKED = 0.2;  // outline opacity: brighter once clicked, dim until then
   let clipSeq = 0;
   function buildIcon(frac, size = ICON_SIZE, clicked = true) {
     const svg = svgChild('svg', {
@@ -534,11 +534,17 @@
   function markClicked(id) {
     if (!id) return;
     const e = watched[id] || (watched[id] = { f: 0, l: 0, t: 0, d: 0, c: 0 });
-    if (!e.c) { e.c = 1; dirty = true; scheduleFlush(); scheduleSweep(); }
+    // Persist IMMEDIATELY, not via the throttled timer: a click is a rare discrete event, and the page
+    // may navigate / reload / open a new tab right after — a 1.5s deferred flush can be lost in that
+    // window (the symptom: clicked outlines vanish on reload). flush() is a read-merge-write, so this is
+    // safe across tabs and cheap at click frequency.
+    if (!e.c) { e.c = 1; dirty = true; flush(); scheduleSweep(); }
   }
-  // Capture phase so we still see the event if a page/extension script stops its propagation.
+  // Listen on `window` in CAPTURE phase: capture runs window -> document -> target, so this fires before
+  // any page/extension handler (e.g. an "open in new tab" script on document) that might call
+  // stopImmediatePropagation and otherwise prevent us from ever seeing the click.
   ['click', 'auxclick', 'contextmenu'].forEach(ev =>
-    document.addEventListener(ev, e => markClicked(idFromClick(e.target)), true));
+    window.addEventListener(ev, e => markClicked(idFromClick(e.target)), true));
 
   // ---------------------------------------------------------------------------
   // Wiring
