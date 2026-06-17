@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.2.0
+// @version      0.3.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. Empty / half / full circle = unseen / partially / fully watched.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -21,11 +21,11 @@
   // Tunables
   // ---------------------------------------------------------------------------
   const STORE_KEY      = 'ywi.watched.v1';   // GM storage key: { videoId: maxFraction }
-  const SAMPLE_MS      = 2000;               // how often to sample the player on a watch page
+  const SAMPLE_MS      = 2000;               // safety-net re-sample interval (events are the primary capture path)
   const FLUSH_MS       = 1500;               // debounce before persisting to GM storage
   const SWEEP_MS       = 200;                // debounce before re-decorating after DOM changes
   const T_PARTIAL      = 0.05;               // >= this fraction -> "half" (red)
-  const T_FULL         = 0.85;               // >  this fraction -> "full" (green)
+  const T_FULL         = 0.50;               // >  this fraction -> "full" (green)
   const ICON_SIZE      = 22;                 // px icon size
   const AVATAR_GAP     = 16;                 // px gap below the channel avatar (grid cards)
   const GUTTER_OFFSET  = 20;                 // px left of the metadata row (fallback for list cards, e.g. search)
@@ -56,18 +56,26 @@
     if (!id || !(frac > 0)) return;
     const prev = watched[id] || 0;
     if (frac > prev) {
-      watched[id] = Math.round(frac * 1000) / 1000;   // 0.001 precision is plenty
+      const crossed = stateFor(frac) !== stateFor(prev);  // empty->half or half->full?
+      watched[id] = Math.round(frac * 1000) / 1000;       // 0.001 precision is plenty
       dirty = true;
       scheduleFlush();
-      scheduleSweep();                                 // update any on-screen badges
+      if (crossed) scheduleSweep();                        // only redraw badges when the icon would change
     }
   }
-  // Persist promptly if the tab is hidden/closed mid-watch.
-  window.addEventListener('visibilitychange', () => { if (document.hidden) flush(); });
-  window.addEventListener('pagehide', flush);
+  // Persist promptly when we might lose the player. Sample FIRST so the latest position is captured
+  // before it goes away. SPA navigation away from a video does NOT fire pagehide/visibilitychange,
+  // so yt-navigate-start is the one that matters for click-to-next-video.
+  function sampleAndFlush() { sampleNow(); flush(); }
+  window.addEventListener('visibilitychange', () => { if (document.hidden) sampleAndFlush(); });
+  window.addEventListener('pagehide', sampleAndFlush);
+  window.addEventListener('beforeunload', sampleAndFlush);
+  window.addEventListener('yt-navigate-start', sampleAndFlush);
 
   // ---------------------------------------------------------------------------
-  // Capture  (read the HTML5 player on /watch and /shorts; store max fraction)
+  // Capture  (EVENT-DRIVEN: every playback tick AND every manual seek updates the stored max
+  // fraction. No dependence on a polling window or on reaching a particular spot — moving the
+  // slider past a threshold by any means, even with the video paused/never-played, is enough.)
   // ---------------------------------------------------------------------------
   function currentVideoId() {
     const u = new URL(location.href);
@@ -76,20 +84,55 @@
     return m ? m[1] : null;
   }
   function isAdShowing() {
-    const p = document.querySelector('#movie_player, .html5-video-player');
+    const p = document.querySelector('#movie_player, #shorts-player, .html5-video-player');
     return !!(p && p.classList.contains('ad-showing'));
   }
-  function samplePlayer() {
-    const id = currentVideoId();
-    if (!id) return;
-    if (isAdShowing()) return;                          // the player element plays ads too — ignore those
-    const v = document.querySelector('video.html5-main-video, video.video-stream');
+  // The watch player's own <video>. Scoped to the player element so a thumbnail hover-preview's
+  // inline <video> (which lives outside #movie_player) can never be sampled.
+  function mainVideo() {
+    const p = document.querySelector('#movie_player, #shorts-player');
+    return p ? p.querySelector('video') : null;
+  }
+
+  // `activeId` = the id of the video CURRENTLY loaded in the player. It is updated only from the
+  // video element's own load events (loadedmetadata / durationchange), which fire once the URL has
+  // settled on the new video — never straight from the URL. That ordering is what stops a stray
+  // late event from the previous video being attributed to the new id during an SPA navigation.
+  let boundVideo = null;
+  let activeId = null;
+
+  function sampleNow(e) {
+    if (!activeId) return;
+    if (isAdShowing()) return;                          // currentTime/duration belong to the ad — ignore
+    const v = (e && e.target && 'duration' in e.target) ? e.target : mainVideo();
     if (!v) return;
     const d = v.duration;
-    if (!d || !isFinite(d) || d <= 0) return;          // skip live streams / not-ready
-    record(id, Math.min(1, v.currentTime / d));
+    if (!d || !isFinite(d) || d <= 0) return;          // live stream (Infinity) / metadata not ready
+    record(activeId, Math.min(1, v.currentTime / d));
   }
-  setInterval(samplePlayer, SAMPLE_MS);
+
+  function bindVideo() {
+    const v = mainVideo();
+    if (!v || v === boundVideo) return;                // already bound to this element
+    boundVideo = v;
+    // All of these can move the playhead; they funnel into one sampler. timeupdate covers normal
+    // playback; seeking/seeked catch manual scrubbing (fire even while paused and even if the video
+    // never started) — so dragging the slider past a threshold is recorded immediately.
+    ['timeupdate', 'seeking', 'seeked', 'pause', 'play', 'playing', 'ratechange', 'progress', 'loadeddata', 'canplay']
+      .forEach(ev => v.addEventListener(ev, sampleNow, { passive: true }));
+    // Lifecycle: re-align activeId to whatever video is now loaded; clear it between videos so a
+    // stray tick in the gap can't be misfiled. ended -> count as fully watched.
+    v.addEventListener('loadedmetadata', () => { activeId = currentVideoId(); sampleNow(); }, { passive: true });
+    v.addEventListener('durationchange', () => { activeId = currentVideoId(); sampleNow(); }, { passive: true });
+    v.addEventListener('emptied', () => { activeId = null; }, { passive: true });
+    v.addEventListener('ended', () => { if (activeId) record(activeId, 1); }, { passive: true });
+    activeId = currentVideoId();                        // the element may already be loaded when we bind
+    sampleNow();
+  }
+
+  // Safety net only (events above are the primary path). Also (re)binds when the player's <video>
+  // first appears or gets swapped out.
+  setInterval(() => { bindVideo(); sampleNow(); }, SAMPLE_MS);
 
   // ---------------------------------------------------------------------------
   // Icons  (three discrete states; ring uses currentColor so it adapts to theme)
@@ -261,9 +304,10 @@
   // Wiring
   // ---------------------------------------------------------------------------
   loadStore();
-  new MutationObserver(scheduleSweep).observe(document.documentElement, { childList: true, subtree: true });
-  window.addEventListener('yt-navigate-finish', scheduleSweep);
+  new MutationObserver(() => { scheduleSweep(); bindVideo(); }).observe(document.documentElement, { childList: true, subtree: true });
+  window.addEventListener('yt-navigate-finish', () => { scheduleSweep(); bindVideo(); });
   scheduleSweep();
+  bindVideo();
 
   // Maintenance helpers in the Tampermonkey menu.
   GM_registerMenuCommand('Export watched data (JSON to console)', () => {
