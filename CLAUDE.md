@@ -1,7 +1,12 @@
 # YouTube Watched Indicator
 
-Tampermonkey userscript that puts a watched-state icon on YouTube video thumbnails:
-**empty ○ / half-filled red ◐ / full green ●** = unseen (<5%) / partially watched (5–50%) / watched (>50%).
+Tampermonkey userscript that puts a watched-state icon on YouTube video thumbnails. As of **v0.6.0**
+the icon is a **pill-shaped progress bar** (same `currentColor` rounded outline as the old ring, just
+elongated) whose **fill width = the exact stored watched fraction** and whose **fill color sweeps
+red → yellow → green** as it fills (linear HSL hue interp 0°→120°, `barColor()`). It replaced the old
+three-state empty ○ / half-filled red ◐ / full green ● circle. The `T_PARTIAL`/`T_FULL` thresholds and
+`stateFor()` survive only as a coarse gate for the live re-sweep during capture (see below) — they no
+longer drive what's drawn; the bar always renders the precise fraction.
 
 Main file: [`youtube-watched-indicator.user.js`](youtube-watched-indicator.user.js)
 

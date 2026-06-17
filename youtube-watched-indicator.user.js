@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.5.0
-// @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. Empty / half / full circle = unseen / partially / fully watched.
+// @version      0.6.0
+// @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A small progress bar shows the exact watched fraction, colored red->green as it fills.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
 // @grant        GM_setValue
@@ -25,12 +25,12 @@
   const SAMPLE_MS      = 2000;               // safety-net re-sample interval (events are the primary capture path)
   const FLUSH_MS       = 1500;               // debounce before persisting to GM storage
   const SWEEP_MS       = 200;                // debounce before re-decorating after DOM changes
-  const T_PARTIAL      = 0.05;               // >= this fraction -> "half" (red)
-  const T_FULL         = 0.50;               // >  this fraction -> "full" (green)
-  const ICON_SIZE      = 22;                 // px icon size
+  const T_PARTIAL      = 0.05;               // >= this fraction -> coarse "partial" bucket (drives the live re-sweep gate only)
+  const T_FULL         = 0.50;               // >  this fraction -> coarse "full" bucket   (drives the live re-sweep gate only)
+  const ICON_SIZE      = 13;                 // px bar height (grid/list cards); width follows the BAR viewBox ratio
   const AVATAR_GAP     = 16;                 // px gap below the channel avatar (grid cards)
-  const GUTTER_OFFSET  = 20;                 // px left of the metadata row (fallback for list cards, e.g. search)
-  const SHORTS_ICON    = 18;                 // px icon size for the inline Shorts badge (sized to the 14px view-count text)
+  const GUTTER_OFFSET  = 24;                 // px left of the metadata row (fallback for list cards, e.g. search)
+  const SHORTS_ICON    = 12;                 // px bar height for the inline Shorts badge (sized to the 14px view-count text)
   const SHORTS_GAP     = 5;                  // px gap between the Shorts badge and the view count
 
   // ---------------------------------------------------------------------------
@@ -198,19 +198,45 @@
     for (const k in attrs) el.setAttribute(k, attrs[k]);
     return el;
   }
-  function buildIcon(state, size = ICON_SIZE) {
-    const svg = svgChild('svg', { viewBox: '0 0 16 16', width: size, height: size });
+  // Watched fraction -> a hue swept red (0deg) -> yellow (60) -> green (120). A linear hue interp
+  // gives the "slowly turns from red to green as it fills" effect the bar's color tracks the amount.
+  function barColor(frac) {
+    const f = Math.max(0, Math.min(1, frac));
+    return `hsl(${Math.round(f * 120)} 78% 45%)`;
+  }
+  // Pill-shaped progress bar: a rounded-rectangle outline (same currentColor ring style as the old
+  // circle) with an inner fill whose WIDTH = watched fraction and COLOR = barColor(frac). The fill is
+  // clipped to the rounded interior, so its left end is rounded and its right end is cut flat at the
+  // fill point — the usual progress-bar look. clip-path needs a document-unique id (counter below).
+  const BAR_W = 44, BAR_H = 14, BAR_SW = 2;  // viewBox units; on-screen size set by `size` (= height)
+  let clipSeq = 0;
+  function buildIcon(frac, size = ICON_SIZE) {
+    const svg = svgChild('svg', {
+      viewBox: `0 0 ${BAR_W} ${BAR_H}`, width: size * BAR_W / BAR_H, height: size
+    });
     svg.style.display = 'block';
-    if (state === 'full') {
-      svg.appendChild(svgChild('circle', { cx: 8, cy: 8, r: 7, fill: '#2ba640' }));
-    } else if (state === 'half') {
-      svg.appendChild(svgChild('path', { d: 'M8 1.5 A6.5 6.5 0 0 0 8 14.5 Z', fill: '#e53935' }));
-      svg.appendChild(svgChild('circle', { cx: 8, cy: 8, r: 6.5, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.5, opacity: 0.8 }));
-    } else {
-      svg.appendChild(svgChild('circle', { cx: 8, cy: 8, r: 6.5, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.5, opacity: 0.55 }));
+    const ix = BAR_SW, iy = BAR_SW, iw = BAR_W - 2 * BAR_SW, ih = BAR_H - 2 * BAR_SW, ir = ih / 2;
+    if (frac > 0) {
+      const id = 'ywi-clip-' + (++clipSeq);
+      const defs = svgChild('defs', {});
+      const clip = svgChild('clipPath', { id });
+      clip.appendChild(svgChild('rect', { x: ix, y: iy, width: iw, height: ih, rx: ir, ry: ir }));
+      defs.appendChild(clip);
+      svg.appendChild(defs);
+      svg.appendChild(svgChild('rect', {
+        x: ix, y: iy, width: Math.max(0.001, iw * Math.min(1, frac)), height: ih,
+        fill: barColor(frac), 'clip-path': `url(#${id})`
+      }));
     }
+    const ox = BAR_SW / 2, oy = BAR_SW / 2, ow = BAR_W - BAR_SW, oh = BAR_H - BAR_SW, or = oh / 2;
+    svg.appendChild(svgChild('rect', {
+      x: ox, y: oy, width: ow, height: oh, rx: or, ry: or,
+      fill: 'none', stroke: 'currentColor', 'stroke-width': BAR_SW, opacity: 0.7
+    }));
     return svg;
   }
+  // Coarse bucket, used ONLY to gate the live re-sweep during capture (avoid re-decorating ~4x/s while
+  // a video plays). The bar itself renders the exact fraction whenever a sweep runs.
   function stateFor(frac) {
     if (frac > T_FULL) return 'full';
     if (frac >= T_PARTIAL) return 'half';
@@ -286,10 +312,10 @@
   // Set the badge's icon + tooltip from the stored fraction for `id`. Shared by all card regimes.
   function applyBadgeState(badge, id, size = ICON_SIZE) {
     const frac = watched[id] || 0;
-    const state = stateFor(frac);
-    if (badge.dataset.state !== state) {
-      badge.dataset.state = state;
-      badge.replaceChildren(buildIcon(state, size));
+    const key = Math.round(frac * 1000) + ':' + size;   // rebuild only when the rendered bar would change
+    if (badge.dataset.fkey !== key) {
+      badge.dataset.fkey = key;
+      badge.replaceChildren(buildIcon(frac, size));
     }
     badge.title = `${Math.round(frac * 100)}% watched`;
   }
