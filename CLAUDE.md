@@ -32,10 +32,21 @@ Data model: `{ videoId: maxFraction }` (0..1), monotonic — only ever takes the
   guard: `activeId` (the loaded video's id) is set **only** from the video's own load events
   (`loadedmetadata`/`durationchange`, when the URL has settled) and cleared on `emptied`, never
   straight from the URL — so a stray late `timeupdate` from the previous video during a nav can't be
-  filed under the new id. Player `<video>` is found via `#movie_player, #shorts-player` (scoped so a
-  thumbnail hover-preview's inline `<video>` is never sampled). **Shorts opened as normal `/watch`**
-  (the user runs a redirect script) therefore capture through this same reliable watch path; native
-  `/shorts/` capture is best-effort (`#shorts-player`, first match only).
+  filed under the new id. Player `<video>` is found via `#movie_player, #shorts-player`; on a native
+  `/shorts/` page (no redirect) `mainVideo()` falls back to the playing `<video>` in the feed (gated
+  to `/shorts/` so it never grabs a hover-preview elsewhere). **Shorts opened as normal `/watch`**
+  (the user runs a redirect script) capture through the reliable watch path either way.
+- **Flush must be THROTTLED, not debounced (v0.4.0 fix — caused silent data loss on Firefox/LibreWolf)**:
+  `scheduleFlush` was a debounce (`clearTimeout` + reset). Fine with the old 2s polling (2s > 1.5s
+  debounce so it drained), but the event-driven `timeupdate` fires ~4x/s, resetting the 1.5s timer
+  before it ever fires → **nothing persisted to GM storage during continuous playback**; only videos
+  paused/ended for >1.5s (or caught by a teardown flush) were saved. Symptom: export showed a handful
+  of entries despite watching dozens. Fix: throttle — schedule at most one flush per `FLUSH_MS` and
+  let it fire (`if (flushTimer) return;`). Chrome masked it because its teardown flush persisted
+  reliably; Firefox's didn't.
+- **`visibilitychange` listener must be on `document`, not `window`**: Firefox/LibreWolf don't fire it
+  on `window`, so the tab-switch flush was silently skipped there (worked on Chrome). Canonical target
+  is `document`.
 - **Trusted Types**: youtube.com enforces `require-trusted-types-for 'script'`, so
   `element.innerHTML = '<svg…>'` **throws**. Build all DOM (the SVG icons) with
   `document.createElementNS` / `replaceChildren`, never innerHTML.

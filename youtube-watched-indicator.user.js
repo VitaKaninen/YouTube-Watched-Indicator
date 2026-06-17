@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.3.0
+// @version      0.4.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. Empty / half / full circle = unseen / partially / fully watched.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -48,9 +48,13 @@
     GM_setValue(STORE_KEY, JSON.stringify(watched));
     dirty = false;
   }
+  // Throttle, NOT debounce. A debounce here (clear + reset on every call) gets STARVED during
+  // playback: timeupdate fires ~4x/s, so a 1.5s timer that resets every ~250ms never fires until
+  // playback stops — silently dropping every video you don't pause for >1.5s. This schedules at most
+  // one flush per FLUSH_MS and lets it fire, guaranteeing periodic persistence while watching.
   function scheduleFlush() {
-    clearTimeout(flushTimer);
-    flushTimer = setTimeout(flush, FLUSH_MS);
+    if (flushTimer) return;
+    flushTimer = setTimeout(() => { flushTimer = null; flush(); }, FLUSH_MS);
   }
   function record(id, frac) {
     if (!id || !(frac > 0)) return;
@@ -67,7 +71,9 @@
   // before it goes away. SPA navigation away from a video does NOT fire pagehide/visibilitychange,
   // so yt-navigate-start is the one that matters for click-to-next-video.
   function sampleAndFlush() { sampleNow(); flush(); }
-  window.addEventListener('visibilitychange', () => { if (document.hidden) sampleAndFlush(); });
+  // visibilitychange is dispatched on `document`; some browsers (incl. Firefox/LibreWolf) don't fire
+  // it on `window`, so listen on document or the tab-switch flush is silently skipped there.
+  document.addEventListener('visibilitychange', () => { if (document.hidden) sampleAndFlush(); });
   window.addEventListener('pagehide', sampleAndFlush);
   window.addEventListener('beforeunload', sampleAndFlush);
   window.addEventListener('yt-navigate-start', sampleAndFlush);
@@ -87,11 +93,21 @@
     const p = document.querySelector('#movie_player, #shorts-player, .html5-video-player');
     return !!(p && p.classList.contains('ad-showing'));
   }
-  // The watch player's own <video>. Scoped to the player element so a thumbnail hover-preview's
-  // inline <video> (which lives outside #movie_player) can never be sampled.
+  // The watch player's own <video> — also what the shorts->/watch redirect lands on. Scoped to the
+  // player element so a thumbnail hover-preview's inline <video> can never be sampled.
   function mainVideo() {
     const p = document.querySelector('#movie_player, #shorts-player');
-    return p ? p.querySelector('video') : null;
+    if (p) { const v = p.querySelector('video'); if (v) return v; }
+    // Native /shorts/ feed (no redirect): several reel players can coexist — take the one actually
+    // playing (the short in view), else the first with a loaded source. Gated to /shorts/ so this
+    // broad fallback never grabs a hover-preview <video> on other pages.
+    if (location.pathname.startsWith('/shorts/')) {
+      const vids = [...document.querySelectorAll('video')];
+      return vids.find(v => !v.paused && (v.currentSrc || v.src))
+          || vids.find(v => v.currentSrc || v.src)
+          || null;
+    }
+    return null;
   }
 
   // `activeId` = the id of the video CURRENTLY loaded in the player. It is updated only from the
