@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.9.0
-// @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place.
+// @version      0.10.0
+// @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
 // @grant        GM_setValue
@@ -44,13 +44,15 @@
   // most recent playhead position), t: ms timestamp of the last `l` update, d: durationSeconds (0 if
   // unknown) }. Legacy entries were a bare number (just the fraction); normEntry upgrades those on read
   // so old data keeps working — l defaults to f (only known position), duration stays 0 until recaptured.
+  // `c` = clicked/opened flag (1 once you've opened the video from a listing, even if you never watched
+  // it — e.g. a deferred/lazy-loaded new tab). 0 = never clicked.
   function normEntry(v) {
-    if (typeof v === 'number') return { f: v, l: v, t: 0, d: 0 };
+    if (typeof v === 'number') return { f: v, l: v, t: 0, d: 0, c: 0 };
     if (v && typeof v === 'object') {
       const f = +v.f || 0;
-      return { f, l: isFinite(v.l) ? +v.l : f, t: +v.t || 0, d: (isFinite(v.d) && v.d > 0) ? +v.d : 0 };
+      return { f, l: isFinite(v.l) ? +v.l : f, t: +v.t || 0, d: (isFinite(v.d) && v.d > 0) ? +v.d : 0, c: v.c ? 1 : 0 };
     }
-    return { f: 0, l: 0, t: 0, d: 0 };
+    return { f: 0, l: 0, t: 0, d: 0, c: 0 };
   }
   function parseStore(raw) {
     let o; try { o = JSON.parse(raw || '{}') || {}; } catch (e) { return {}; }
@@ -69,10 +71,11 @@
     let changed = false;
     for (const id in other) {
       const o = other[id], c = watched[id];
-      if (!c) { watched[id] = { f: o.f, l: o.l, t: o.t, d: o.d }; changed = true; continue; }
+      if (!c) { watched[id] = { f: o.f, l: o.l, t: o.t, d: o.d, c: o.c }; changed = true; continue; }
       if (o.f > c.f) { c.f = o.f; changed = true; }
       if (!c.d && o.d) { c.d = o.d; changed = true; }
       if (o.t > c.t) { c.l = o.l; c.t = o.t; changed = true; }
+      if (o.c && !c.c) { c.c = 1; changed = true; }       // clicked is sticky — OR across copies
     }
     return changed;
   }
@@ -250,8 +253,9 @@
   // clipped to the rounded interior, so its left end is rounded and its right end is cut flat at the
   // fill point — the usual progress-bar look. clip-path needs a document-unique id (counter below).
   const BAR_W = 44, BAR_H = 14, BAR_SW = 2;  // viewBox units; on-screen size set by `size` (= height)
+  const OUTLINE_CLICKED = 0.75, OUTLINE_UNCLICKED = 0.3;  // outline opacity: brighter once clicked, dim until then
   let clipSeq = 0;
-  function buildIcon(frac, size = ICON_SIZE) {
+  function buildIcon(frac, size = ICON_SIZE, clicked = true) {
     const svg = svgChild('svg', {
       viewBox: `0 0 ${BAR_W} ${BAR_H}`, width: size * BAR_W / BAR_H, height: size
     });
@@ -272,7 +276,8 @@
     const ox = BAR_SW / 2, oy = BAR_SW / 2, ow = BAR_W - BAR_SW, oh = BAR_H - BAR_SW, or = oh / 2;
     svg.appendChild(svgChild('rect', {
       x: ox, y: oy, width: ow, height: oh, rx: or, ry: or,
-      fill: 'none', stroke: 'currentColor', 'stroke-width': BAR_SW, opacity: 0.7
+      fill: 'none', stroke: 'currentColor', 'stroke-width': BAR_SW,
+      opacity: clicked ? OUTLINE_CLICKED : OUTLINE_UNCLICKED
     }));
     return svg;
   }
@@ -353,10 +358,11 @@
   // Set the badge's icon + tooltip from the stored fraction for `id`. Shared by all card regimes.
   function applyBadgeState(badge, id, size = ICON_SIZE) {
     const frac = fracOf(id), dur = durOf(id);
-    const key = Math.round(frac * 1000) + ':' + size;   // rebuild only when the rendered bar would change
+    const clicked = ((watched[id] && watched[id].c) ? 1 : 0) || frac > 0;  // watched implies clicked
+    const key = Math.round(frac * 1000) + ':' + size + ':' + (clicked ? 1 : 0);  // rebuild only when the rendered bar changes
     if (badge.dataset.fkey !== key) {
       badge.dataset.fkey = key;
-      badge.replaceChildren(buildIcon(frac, size));
+      badge.replaceChildren(buildIcon(frac, size, !!clicked));
     }
     // Tooltip on hover: "57% / 4:40" — the position you'd reached. Duration is only known once the
     // video has been watched at least once on this device; until then just show the percentage.
@@ -503,6 +509,36 @@
       ? `Click to resume at ${Math.round(last * 100)}%${dur ? ' / ' + fmtTime(last * dur) : ''} · furthest ${Math.round(frac * 100)}%${dur ? ' / ' + fmtTime(frac * dur) : ''}`
       : 'No recorded position yet';
   }
+
+  // ---------------------------------------------------------------------------
+  // Click tracking  (mark a video "opened" the moment you click it on a listing — left-click,
+  // middle-click/auxclick, or right-click->open-in-new-tab. Captured on the listing page where the
+  // click happens, so it works even when the new tab is deferred/lazy-loaded and never runs the script.
+  // Purpose: stop re-opening the same video in multiple tabs — clicked cards get a brighter outline.)
+  // ---------------------------------------------------------------------------
+  function idFromClick(target) {
+    if (!target || !target.closest) return null;
+    const a = target.closest('a[href]');
+    if (a) {
+      const href = a.getAttribute('href') || '';
+      let m = href.match(/[?&]v=([\w-]{11})/); if (m) return m[1];
+      m = href.match(/\/shorts\/([\w-]{11})/); if (m) return m[1];
+    }
+    const card = target.closest(
+      'yt-lockup-view-model, ytd-video-renderer, ytd-rich-item-renderer, ytd-grid-video-renderer, ' +
+      'ytd-compact-video-renderer, ytd-playlist-video-renderer, ' +
+      'ytm-shorts-lockup-view-model-v2, ytm-shorts-lockup-view-model'
+    );
+    return card ? idFromCard(card) : null;
+  }
+  function markClicked(id) {
+    if (!id) return;
+    const e = watched[id] || (watched[id] = { f: 0, l: 0, t: 0, d: 0, c: 0 });
+    if (!e.c) { e.c = 1; dirty = true; scheduleFlush(); scheduleSweep(); }
+  }
+  // Capture phase so we still see the event if a page/extension script stops its propagation.
+  ['click', 'auxclick', 'contextmenu'].forEach(ev =>
+    document.addEventListener(ev, e => markClicked(idFromClick(e.target)), true));
 
   // ---------------------------------------------------------------------------
   // Wiring

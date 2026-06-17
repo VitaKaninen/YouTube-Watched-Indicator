@@ -22,7 +22,7 @@ and stores it locally in Tampermonkey. Consequences, all accepted by the user:
 - **This-browser-only** — data lives in this profile's GM storage; no cross-device sync.
 - **Fully local** — nothing sent to Google; consistent with the user's history-off stance.
 
-Data model (**v0.9.0**): `{ videoId: { f, l, t, d } }`:
+Data model (**v0.10.0**): `{ videoId: { f, l, t, d, c } }`:
 - `f` — **furthest** fraction (0..1), monotonic high-water mark (only ever increases). Drives the
   thumbnail bar fill and the watch-page green fill.
 - `l` — **last** fraction (0..1), the most recent playhead position; **not** monotonic (a seek-back
@@ -31,10 +31,12 @@ Data model (**v0.9.0**): `{ videoId: { f, l, t, d } }`:
   since `l` has no max to fall back on, the newest write wins.
 - `d` — durationSeconds, constant per video, captured from the player, filled in whenever it first
   becomes known (0 until then). Needed for the mm:ss timestamps.
+- `c` — **clicked/opened** flag (1 once you've opened the video from a listing, even if never watched);
+  sticky, OR-merged across copies. Dims the empty bar's outline until set (see below).
 
 **Legacy compat:** older entries were a bare number (just the fraction); `normEntry()` upgrades any
-`number` to `{ f, l: f, t: 0, d: 0 }` on read, so old data keeps working — `l` defaults to `f` and the
-timestamp won't show until `d` is recaptured. All storage helpers (`fracOf`/`lastOf`/`durOf`/`mergeInto`/
+`number` to `{ f, l: f, t: 0, d: 0, c: 0 }` on read, so old data keeps working — `l` defaults to `f` and
+the timestamp won't show until `d` is recaptured. All storage helpers (`fracOf`/`lastOf`/`durOf`/`mergeInto`/
 `record`) operate on the object shape; the in-memory map is normalized to objects in `parseStore()`.
 
 Two features ride on `d`:
@@ -52,6 +54,15 @@ Two features ride on `d`:
   — clicking elsewhere must not move (and thus overwrite, via `record()`) your saved spot. Seeks **in
   place, no reload** (the point of it vs. a `?t=` URL). Built from divs (not SVG) so it stretches with
   rounded ends. Wired from `sweep()` + the `SAMPLE_MS` interval; removes itself when off `/watch`.
+
+**Click tracking (`c`):** a capture-phase `click`/`auxclick`/`contextmenu` listener on `document`
+(`markClicked` / `idFromClick`) marks a video opened the instant you click its card on a listing —
+covering left-click, middle-click, and right-click→open-in-new-tab. Captured **on the listing page**,
+so it works even though the user's setup opens videos in deferred/lazy-loaded tabs that never run the
+script (the whole point — the new tab needn't load for the mark to stick). The empty bar's outline is
+dim (`OUTLINE_UNCLICKED`=0.3 opacity) until clicked, then brighter (`OUTLINE_CLICKED`=0.75); a watched
+video (`f>0`) counts as clicked regardless. Opacity (not a hardcoded gray) so it adapts to theme.
+Purpose: the user opens many "watch later" tabs and forgets which they've already opened.
 
 ## Gotchas (verified live 2026-06-16)
 
