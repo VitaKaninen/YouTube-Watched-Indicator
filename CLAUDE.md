@@ -22,13 +22,20 @@ and stores it locally in Tampermonkey. Consequences, all accepted by the user:
 - **This-browser-only** — data lives in this profile's GM storage; no cross-device sync.
 - **Fully local** — nothing sent to Google; consistent with the user's history-off stance.
 
-Data model (**v0.7.0**): `{ videoId: { f: maxFraction (0..1), d: durationSeconds } }`, monotonic on `f`
-(only ever takes the max fraction seen); `d` is captured from the player and is constant per video,
-filled in whenever it first becomes known (0 until then). **Legacy compat:** older entries were a bare
-number (just the fraction); `normEntry()` upgrades any `number` to `{ f, d: 0 }` on read, so old data
-keeps working — its timestamp just won't show until the video is watched again and `d` is captured. All
-storage helpers (`fracOf`/`durOf`/`mergeInto`/`record`) operate on the object shape; the in-memory map
-is normalized to objects in `parseStore()`.
+Data model (**v0.9.0**): `{ videoId: { f, l, t, d } }`:
+- `f` — **furthest** fraction (0..1), monotonic high-water mark (only ever increases). Drives the
+  thumbnail bar fill and the watch-page green fill.
+- `l` — **last** fraction (0..1), the most recent playhead position; **not** monotonic (a seek-back
+  lowers it). Drives the watch-page white marker and the resume click.
+- `t` — ms timestamp of the last `l` update. Used only to resolve `l` across tabs (see `mergeInto`):
+  since `l` has no max to fall back on, the newest write wins.
+- `d` — durationSeconds, constant per video, captured from the player, filled in whenever it first
+  becomes known (0 until then). Needed for the mm:ss timestamps.
+
+**Legacy compat:** older entries were a bare number (just the fraction); `normEntry()` upgrades any
+`number` to `{ f, l: f, t: 0, d: 0 }` on read, so old data keeps working — `l` defaults to `f` and the
+timestamp won't show until `d` is recaptured. All storage helpers (`fracOf`/`lastOf`/`durOf`/`mergeInto`/
+`record`) operate on the object shape; the in-memory map is normalized to objects in `parseStore()`.
 
 Two features ride on `d`:
 - **Hover timestamp** — the thumbnail bar's `title` shows `57% / 4:40` (percentage + the position you'd
@@ -39,12 +46,12 @@ Two features ride on `d`:
   (`placeUnderAvatar`) and list (`placeInGutter`) placements did and were flipped to `auto`.
 - **Watch-page resume bar (`/watch` only)** — `updateWatchBar()` injects a clickable `<div>` bar under
   the title (anchored in `ytd-watch-metadata #above-the-fold`, before `#bottom-row`; capped at
-  `WATCHBAR_MAXW`=360px — full column width was "too wide"). Fill = stored max with a marker at that
-  point. **It is deliberately NOT a scrub bar:** clicking *anywhere* jumps to the recorded position
-  (`video.currentTime = fracOf(id) * d`), never to the click point — clicking elsewhere must not move
-  (and thus overwrite, via `record()`) your saved spot. Seeks **in place, no reload** (the point of it
-  vs. a `?t=` URL). Built from divs (not SVG) so it stretches with rounded ends. Wired from `sweep()` +
-  the `SAMPLE_MS` interval; removes itself when off `/watch`.
+  `WATCHBAR_MAXW`=360px — full column width was "too wide"). Green fill = **furthest** position (`f`);
+  white marker = **last** position (`l`, ≤ `f`). **It is deliberately NOT a scrub bar:** clicking
+  *anywhere* jumps to the LAST position (`video.currentTime = lastOf(id) * d`), never to the click point
+  — clicking elsewhere must not move (and thus overwrite, via `record()`) your saved spot. Seeks **in
+  place, no reload** (the point of it vs. a `?t=` URL). Built from divs (not SVG) so it stretches with
+  rounded ends. Wired from `sweep()` + the `SAMPLE_MS` interval; removes itself when off `/watch`.
 
 ## Gotchas (verified live 2026-06-16)
 

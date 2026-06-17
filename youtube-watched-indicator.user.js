@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.8.0
-// @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; on the watch page a bar shows your last recorded position and click it to resume there in place.
+// @version      0.9.0
+// @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
 // @grant        GM_setValue
@@ -40,13 +40,17 @@
   let dirty = false;
   let flushTimer = null;
 
-  // Each entry is { f: maxFraction (0..1), d: durationSeconds (0 if unknown) }. Legacy entries were a
-  // bare number (just the fraction); normEntry upgrades those on read so old data keeps working — the
-  // duration simply stays 0 (no timestamp shown) until the video is watched again and captures it.
+  // Each entry is { f: furthestFraction (0..1, monotonic), l: lastFraction (0..1, NOT monotonic — the
+  // most recent playhead position), t: ms timestamp of the last `l` update, d: durationSeconds (0 if
+  // unknown) }. Legacy entries were a bare number (just the fraction); normEntry upgrades those on read
+  // so old data keeps working — l defaults to f (only known position), duration stays 0 until recaptured.
   function normEntry(v) {
-    if (typeof v === 'number') return { f: v, d: 0 };
-    if (v && typeof v === 'object') return { f: +v.f || 0, d: (isFinite(v.d) && v.d > 0) ? +v.d : 0 };
-    return { f: 0, d: 0 };
+    if (typeof v === 'number') return { f: v, l: v, t: 0, d: 0 };
+    if (v && typeof v === 'object') {
+      const f = +v.f || 0;
+      return { f, l: isFinite(v.l) ? +v.l : f, t: +v.t || 0, d: (isFinite(v.d) && v.d > 0) ? +v.d : 0 };
+    }
+    return { f: 0, l: 0, t: 0, d: 0 };
   }
   function parseStore(raw) {
     let o; try { o = JSON.parse(raw || '{}') || {}; } catch (e) { return {}; }
@@ -54,17 +58,21 @@
     for (const id in o) out[id] = normEntry(o[id]);
     return out;
   }
-  function fracOf(id) { const e = watched[id]; return (e && e.f) || 0; }
+  function fracOf(id) { const e = watched[id]; return (e && e.f) || 0; }   // furthest position
+  function lastOf(id) { const e = watched[id]; return e ? (isFinite(e.l) ? e.l : e.f) : 0; }  // last position
   function durOf(id)  { const e = watched[id]; return (e && e.d) || 0; }
-  // Merge another (already-normalized) copy of the map into ours: keep the larger fraction per id
-  // (monotonic) and fill in a duration whenever one side knows it and the other doesn't.
+  // Merge another (already-normalized) copy of the map into ours. `f` keeps the larger fraction
+  // (monotonic); `d` is filled whenever one side knows it. `l` has no max to fall back on (it's the
+  // latest position, not a high-water mark), so the newest write wins by timestamp `t` — this is what
+  // lets the active tab's seek-back-then-stop survive an idle tab re-persisting its older copy.
   function mergeInto(other) {
     let changed = false;
     for (const id in other) {
       const o = other[id], c = watched[id];
-      if (!c) { watched[id] = { f: o.f, d: o.d }; changed = true; continue; }
+      if (!c) { watched[id] = { f: o.f, l: o.l, t: o.t, d: o.d }; changed = true; continue; }
       if (o.f > c.f) { c.f = o.f; changed = true; }
       if (!c.d && o.d) { c.d = o.d; changed = true; }
+      if (o.t > c.t) { c.l = o.l; c.t = o.t; changed = true; }
     }
     return changed;
   }
@@ -102,13 +110,18 @@
   }
   function record(id, frac, dur) {
     if (!id || !(frac > 0)) return;
-    const e = watched[id] || (watched[id] = { f: 0, d: 0 });
+    const e = watched[id] || (watched[id] = { f: 0, l: 0, t: 0, d: 0 });
+    const r = Math.round(frac * 1000) / 1000;             // 0.001 precision is plenty
     let changed = false;
-    if (frac > e.f) {
-      const crossed = stateFor(frac) !== stateFor(e.f);   // coarse bucket change?
-      e.f = Math.round(frac * 1000) / 1000;               // 0.001 precision is plenty
+    if (r > e.f) {                                         // furthest: monotonic high-water mark
+      const crossed = stateFor(r) !== stateFor(e.f);       // coarse bucket change?
+      e.f = r;
       changed = true;
       if (crossed) scheduleSweep();                        // only redraw badges when the bucket flips
+    }
+    if (r !== e.l) {                                       // last: the current playhead, can move either way
+      e.l = r; e.t = Date.now();
+      changed = true;
     }
     // Duration is constant per video but may not be ready on the first sample — record it whenever it
     // becomes known. Rounded to whole seconds (all we need for a mm:ss timestamp).
@@ -453,13 +466,13 @@
     });
     wrap.append(track, marker);
 
-    // Click ANYWHERE -> jump to the recorded position (not the click point), so a stray click can't
-    // move (and thus overwrite) your saved spot. Reads the stored fraction fresh at click time.
+    // Click ANYWHERE -> jump to the LAST recorded position (the white marker), not the click point,
+    // so a stray click can't move (and thus overwrite) your saved spot. Read fresh at click time.
     track.addEventListener('click', () => {
       const v = mainVideo();
       const d = (v && isFinite(v.duration) && v.duration > 0) ? v.duration : durOf(currentVideoId());
-      const f = fracOf(currentVideoId());
-      if (v && d && f > 0) v.currentTime = f * d;        // seek in place — no reload
+      const l = lastOf(currentVideoId());
+      if (v && d && l > 0) v.currentTime = l * d;        // seek in place — no reload
     });
 
     wrap._ywi = { fill, marker };
@@ -480,14 +493,14 @@
     if (wrap.parentNode !== anchor) {                    // (re)attach below the title, above the channel row
       anchor.insertBefore(wrap, anchor.querySelector('#bottom-row') || anchor.firstChild);
     }
-    const frac = fracOf(id), dur = durOf(id);
+    const frac = fracOf(id), last = lastOf(id), dur = durOf(id);
     const { fill, marker } = wrap._ywi;
-    fill.style.width = (frac * 100) + '%';
+    fill.style.width = (frac * 100) + '%';                // green fill up to the FURTHEST position
     fill.style.background = barColor(frac);
-    if (frac > 0) { marker.style.display = 'block'; marker.style.left = (frac * 100) + '%'; }
+    if (frac > 0) { marker.style.display = 'block'; marker.style.left = (last * 100) + '%'; }  // white = LAST position
     else marker.style.display = 'none';
     wrap.title = frac > 0
-      ? `Click to resume at ${Math.round(frac * 100)}%${dur ? ' / ' + fmtTime(frac * dur) : ''}`
+      ? `Click to resume at ${Math.round(last * 100)}%${dur ? ' / ' + fmtTime(last * dur) : ''} · furthest ${Math.round(frac * 100)}%${dur ? ' / ' + fmtTime(frac * dur) : ''}`
       : 'No recorded position yet';
   }
 
