@@ -47,6 +47,17 @@ Data model: `{ videoId: maxFraction }` (0..1), monotonic — only ever takes the
 - **`visibilitychange` listener must be on `document`, not `window`**: Firefox/LibreWolf don't fire it
   on `window`, so the tab-switch flush was silently skipped there (worked on Chrome). Canonical target
   is `document`.
+- **Cross-tab GM storage doesn't propagate reliably on Firefox/LibreWolf (v0.5.0)**: with a video tab
+  and an already-open Subscriptions tab, the subs tab kept reading a *stale* blob even after a reload —
+  a freshly-watched video was in storage (the watch tab's reload-dump proved it) yet absent from the
+  subs tab's dump. Diagnostic tell: the whole map is one JSON value under one key, so a single fresh
+  read can't contain one new entry but miss another — divergent dumps ⇒ the tabs hold different copies.
+  Two-part fix: (1) **read-merge-write** in `flush()` (`mergeInto(storage)` before `GM_setValue`) so a
+  stale in-memory copy can never clobber another tab's entries (monotonic max keeps the larger); (2)
+  **`GM_addValueChangeListener`** (`watchStore()`) to fold in remote writes live and re-sweep, so an
+  open tab updates without a manual reload. **Caveat from (1):** the Reset menu command must write `{}`
+  **directly** (not via `flush()`, which would merge the old data straight back). The export command
+  now re-reads storage before dumping so it reflects what's persisted, not just this tab's memory.
 - **Trusted Types**: youtube.com enforces `require-trusted-types-for 'script'`, so
   `element.innerHTML = '<svg…>'` **throws**. Build all DOM (the SVG icons) with
   `document.createElementNS` / `replaceChildren`, never innerHTML.

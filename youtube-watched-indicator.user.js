@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.4.0
+// @version      0.5.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. Empty / half / full circle = unseen / partially / fully watched.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_addValueChangeListener
 // @grant        GM_registerMenuCommand
 // @run-at       document-idle
 // @noframes
@@ -39,14 +40,40 @@
   let dirty = false;
   let flushTimer = null;
 
+  function parseStore(raw) {
+    try { return JSON.parse(raw || '{}') || {}; } catch (e) { return {}; }
+  }
+  // Merge another copy of the map into ours, keeping the larger fraction per id (monotonic).
+  function mergeInto(other) {
+    let changed = false;
+    for (const id in other) {
+      if (!(watched[id] >= other[id])) { watched[id] = other[id]; changed = true; }
+    }
+    return changed;
+  }
   function loadStore() {
-    try { watched = JSON.parse(GM_getValue(STORE_KEY, '{}')) || {}; }
-    catch (e) { watched = {}; }
+    watched = parseStore(GM_getValue(STORE_KEY, '{}'));
   }
   function flush() {
     if (!dirty) return;
+    // Read-merge-write: fold in whatever is in storage *now* before overwriting, so a stale
+    // in-memory copy (e.g. another tab wrote while this one had the page open) can never clobber
+    // entries this tab never saw. The whole map lives under one key, so a blind write would do exactly
+    // that. Monotonic max keeps the higher fraction on every conflict.
+    mergeInto(parseStore(GM_getValue(STORE_KEY, '{}')));
     GM_setValue(STORE_KEY, JSON.stringify(watched));
     dirty = false;
+  }
+  // Live cross-tab sync: when another tab persists progress, fold it into this tab's map and redraw,
+  // so an already-open page (e.g. Subscriptions) updates without a manual reload. Firefox/LibreWolf
+  // don't reliably propagate GM storage to other open tabs otherwise — a plain reload there can read
+  // a stale copy, which is why a freshly-watched video failed to show up across tabs.
+  function watchStore() {
+    if (typeof GM_addValueChangeListener !== 'function') return;
+    GM_addValueChangeListener(STORE_KEY, (key, oldVal, newVal, remote) => {
+      if (!remote) return;                                 // ignore our own writes
+      if (mergeInto(parseStore(newVal))) scheduleSweep();
+    });
   }
   // Throttle, NOT debounce. A debounce here (clear + reset on every call) gets STARVED during
   // playback: timeupdate fires ~4x/s, so a 1.5s timer that resets every ~250ms never fires until
@@ -127,6 +154,16 @@
     record(activeId, Math.min(1, v.currentTime / d));
   }
 
+  // Continuous progress (timeupdate, scrub-in-progress) rides the throttled flush. Discrete user
+  // actions — finishing a seek, pausing, ending — flush to storage IMMEDIATELY, so the value lands
+  // the instant you act, even if you bounce straight to another tab/window and reload before the
+  // 1.5s throttle would have fired (the cross-tab "reloaded and it's not there yet" case).
+  const FLUSH_ON = new Set(['seeked', 'pause', 'ended']);
+  function onSample(e) {
+    sampleNow(e);
+    if (e && FLUSH_ON.has(e.type)) flush();
+  }
+
   function bindVideo() {
     const v = mainVideo();
     if (!v || v === boundVideo) return;                // already bound to this element
@@ -135,13 +172,13 @@
     // playback; seeking/seeked catch manual scrubbing (fire even while paused and even if the video
     // never started) — so dragging the slider past a threshold is recorded immediately.
     ['timeupdate', 'seeking', 'seeked', 'pause', 'play', 'playing', 'ratechange', 'progress', 'loadeddata', 'canplay']
-      .forEach(ev => v.addEventListener(ev, sampleNow, { passive: true }));
+      .forEach(ev => v.addEventListener(ev, onSample, { passive: true }));
     // Lifecycle: re-align activeId to whatever video is now loaded; clear it between videos so a
-    // stray tick in the gap can't be misfiled. ended -> count as fully watched.
+    // stray tick in the gap can't be misfiled. ended -> count as fully watched (and flush at once).
     v.addEventListener('loadedmetadata', () => { activeId = currentVideoId(); sampleNow(); }, { passive: true });
     v.addEventListener('durationchange', () => { activeId = currentVideoId(); sampleNow(); }, { passive: true });
     v.addEventListener('emptied', () => { activeId = null; }, { passive: true });
-    v.addEventListener('ended', () => { if (activeId) record(activeId, 1); }, { passive: true });
+    v.addEventListener('ended', () => { if (activeId) { record(activeId, 1); flush(); } }, { passive: true });
     activeId = currentVideoId();                        // the element may already be loaded when we bind
     sampleNow();
   }
@@ -320,6 +357,7 @@
   // Wiring
   // ---------------------------------------------------------------------------
   loadStore();
+  watchStore();
   new MutationObserver(() => { scheduleSweep(); bindVideo(); }).observe(document.documentElement, { childList: true, subtree: true });
   window.addEventListener('yt-navigate-finish', () => { scheduleSweep(); bindVideo(); });
   scheduleSweep();
@@ -327,11 +365,15 @@
 
   // Maintenance helpers in the Tampermonkey menu.
   GM_registerMenuCommand('Export watched data (JSON to console)', () => {
+    // Read straight from storage (and fold into memory) so the dump always reflects what's actually
+    // persisted, not just this tab's in-memory copy — the reliable thing to compare across tabs.
+    mergeInto(parseStore(GM_getValue(STORE_KEY, '{}')));
     console.log('[YWI] watched data:', JSON.stringify(watched));
   });
   GM_registerMenuCommand('Reset all watched data', () => {
     if (confirm('Erase all locally-stored watched data for this script?')) {
-      watched = {}; dirty = true; flush(); scheduleSweep();
+      // Write empty directly — flush() does a read-merge-write and would fold the old data right back.
+      watched = {}; dirty = false; GM_setValue(STORE_KEY, '{}'); scheduleSweep();
     }
   });
 })();
