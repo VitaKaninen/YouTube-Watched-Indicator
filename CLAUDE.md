@@ -22,7 +22,23 @@ and stores it locally in Tampermonkey. Consequences, all accepted by the user:
 - **This-browser-only** — data lives in this profile's GM storage; no cross-device sync.
 - **Fully local** — nothing sent to Google; consistent with the user's history-off stance.
 
-Data model: `{ videoId: maxFraction }` (0..1), monotonic — only ever takes the max fraction seen.
+Data model (**v0.7.0**): `{ videoId: { f: maxFraction (0..1), d: durationSeconds } }`, monotonic on `f`
+(only ever takes the max fraction seen); `d` is captured from the player and is constant per video,
+filled in whenever it first becomes known (0 until then). **Legacy compat:** older entries were a bare
+number (just the fraction); `normEntry()` upgrades any `number` to `{ f, d: 0 }` on read, so old data
+keeps working — its timestamp just won't show until the video is watched again and `d` is captured. All
+storage helpers (`fracOf`/`durOf`/`mergeInto`/`record`) operate on the object shape; the in-memory map
+is normalized to objects in `parseStore()`.
+
+Two features ride on `d`:
+- **Hover timestamp** — the thumbnail bar's `title` shows `57% / 4:40` (percentage + the position you'd
+  reached = `f * d`), via `fmtTime()`. Falls back to `NN% watched` when `d` is unknown.
+- **Watch-page resume bar (`/watch` only)** — `updateWatchBar()` injects a wider, clickable `<div>` bar
+  under the title (anchored in `ytd-watch-metadata #above-the-fold`, before `#bottom-row`). Fill = stored
+  max with a marker at that point; **clicking seeks the player in place** (`video.currentTime = f * d`,
+  **no reload** — the point of it vs. a `?t=` URL), and a cursor label shows the target timestamp. Built
+  from divs (not SVG) so it stretches responsively with rounded ends. Wired from `sweep()` + the
+  `SAMPLE_MS` interval; removes itself when off `/watch`.
 
 ## Gotchas (verified live 2026-06-16)
 

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.6.0
-// @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A small progress bar shows the exact watched fraction, colored red->green as it fills.
+// @version      0.7.0
+// @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; on the watch page the bar is clickable to seek/resume in place.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
 // @grant        GM_setValue
@@ -40,14 +40,31 @@
   let dirty = false;
   let flushTimer = null;
 
-  function parseStore(raw) {
-    try { return JSON.parse(raw || '{}') || {}; } catch (e) { return {}; }
+  // Each entry is { f: maxFraction (0..1), d: durationSeconds (0 if unknown) }. Legacy entries were a
+  // bare number (just the fraction); normEntry upgrades those on read so old data keeps working — the
+  // duration simply stays 0 (no timestamp shown) until the video is watched again and captures it.
+  function normEntry(v) {
+    if (typeof v === 'number') return { f: v, d: 0 };
+    if (v && typeof v === 'object') return { f: +v.f || 0, d: (isFinite(v.d) && v.d > 0) ? +v.d : 0 };
+    return { f: 0, d: 0 };
   }
-  // Merge another copy of the map into ours, keeping the larger fraction per id (monotonic).
+  function parseStore(raw) {
+    let o; try { o = JSON.parse(raw || '{}') || {}; } catch (e) { return {}; }
+    const out = {};
+    for (const id in o) out[id] = normEntry(o[id]);
+    return out;
+  }
+  function fracOf(id) { const e = watched[id]; return (e && e.f) || 0; }
+  function durOf(id)  { const e = watched[id]; return (e && e.d) || 0; }
+  // Merge another (already-normalized) copy of the map into ours: keep the larger fraction per id
+  // (monotonic) and fill in a duration whenever one side knows it and the other doesn't.
   function mergeInto(other) {
     let changed = false;
     for (const id in other) {
-      if (!(watched[id] >= other[id])) { watched[id] = other[id]; changed = true; }
+      const o = other[id], c = watched[id];
+      if (!c) { watched[id] = { f: o.f, d: o.d }; changed = true; continue; }
+      if (o.f > c.f) { c.f = o.f; changed = true; }
+      if (!c.d && o.d) { c.d = o.d; changed = true; }
     }
     return changed;
   }
@@ -83,16 +100,20 @@
     if (flushTimer) return;
     flushTimer = setTimeout(() => { flushTimer = null; flush(); }, FLUSH_MS);
   }
-  function record(id, frac) {
+  function record(id, frac, dur) {
     if (!id || !(frac > 0)) return;
-    const prev = watched[id] || 0;
-    if (frac > prev) {
-      const crossed = stateFor(frac) !== stateFor(prev);  // empty->half or half->full?
-      watched[id] = Math.round(frac * 1000) / 1000;       // 0.001 precision is plenty
-      dirty = true;
-      scheduleFlush();
-      if (crossed) scheduleSweep();                        // only redraw badges when the icon would change
+    const e = watched[id] || (watched[id] = { f: 0, d: 0 });
+    let changed = false;
+    if (frac > e.f) {
+      const crossed = stateFor(frac) !== stateFor(e.f);   // coarse bucket change?
+      e.f = Math.round(frac * 1000) / 1000;               // 0.001 precision is plenty
+      changed = true;
+      if (crossed) scheduleSweep();                        // only redraw badges when the bucket flips
     }
+    // Duration is constant per video but may not be ready on the first sample — record it whenever it
+    // becomes known. Rounded to whole seconds (all we need for a mm:ss timestamp).
+    if (dur && isFinite(dur) && dur > 0 && !e.d) { e.d = Math.round(dur); changed = true; }
+    if (changed) { dirty = true; scheduleFlush(); }
   }
   // Persist promptly when we might lose the player. Sample FIRST so the latest position is captured
   // before it goes away. SPA navigation away from a video does NOT fire pagehide/visibilitychange,
@@ -151,7 +172,7 @@
     if (!v) return;
     const d = v.duration;
     if (!d || !isFinite(d) || d <= 0) return;          // live stream (Infinity) / metadata not ready
-    record(activeId, Math.min(1, v.currentTime / d));
+    record(activeId, Math.min(1, v.currentTime / d), d);
   }
 
   // Continuous progress (timeupdate, scrub-in-progress) rides the throttled flush. Discrete user
@@ -178,14 +199,14 @@
     v.addEventListener('loadedmetadata', () => { activeId = currentVideoId(); sampleNow(); }, { passive: true });
     v.addEventListener('durationchange', () => { activeId = currentVideoId(); sampleNow(); }, { passive: true });
     v.addEventListener('emptied', () => { activeId = null; }, { passive: true });
-    v.addEventListener('ended', () => { if (activeId) { record(activeId, 1); flush(); } }, { passive: true });
+    v.addEventListener('ended', () => { if (activeId) { record(activeId, 1, v.duration); flush(); } }, { passive: true });
     activeId = currentVideoId();                        // the element may already be loaded when we bind
     sampleNow();
   }
 
   // Safety net only (events above are the primary path). Also (re)binds when the player's <video>
   // first appears or gets swapped out.
-  setInterval(() => { bindVideo(); sampleNow(); }, SAMPLE_MS);
+  setInterval(() => { bindVideo(); sampleNow(); updateWatchBar(); }, SAMPLE_MS);
 
   // ---------------------------------------------------------------------------
   // Icons  (three discrete states; ring uses currentColor so it adapts to theme)
@@ -203,6 +224,13 @@
   function barColor(frac) {
     const f = Math.max(0, Math.min(1, frac));
     return `hsl(${Math.round(f * 120)} 78% 45%)`;
+  }
+  // Seconds -> "m:ss" (or "h:mm:ss" for long videos), matching YouTube's own timestamp style.
+  function fmtTime(s) {
+    s = Math.max(0, Math.round(s));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    const pad = n => String(n).padStart(2, '0');
+    return (h ? `${h}:${pad(m)}` : `${m}`) + ':' + pad(sec);
   }
   // Pill-shaped progress bar: a rounded-rectangle outline (same currentColor ring style as the old
   // circle) with an inner fill whose WIDTH = watched fraction and COLOR = barColor(frac). The fill is
@@ -311,13 +339,16 @@
 
   // Set the badge's icon + tooltip from the stored fraction for `id`. Shared by all card regimes.
   function applyBadgeState(badge, id, size = ICON_SIZE) {
-    const frac = watched[id] || 0;
+    const frac = fracOf(id), dur = durOf(id);
     const key = Math.round(frac * 1000) + ':' + size;   // rebuild only when the rendered bar would change
     if (badge.dataset.fkey !== key) {
       badge.dataset.fkey = key;
       badge.replaceChildren(buildIcon(frac, size));
     }
-    badge.title = `${Math.round(frac * 100)}% watched`;
+    // Tooltip on hover: "57% / 4:40" — the position you'd reached. Duration is only known once the
+    // video has been watched at least once on this device; until then just show the percentage.
+    const pct = Math.round(frac * 100);
+    badge.title = dur > 0 ? `${pct}% / ${fmtTime(frac * dur)}` : `${pct}% watched`;
   }
 
   function decorateRow(row) {
@@ -371,12 +402,112 @@
     document.querySelectorAll('yt-content-metadata-view-model').forEach(decorateRow);
     // Shorts regime: distinct DOM, badge overlaid on the thumbnail.
     document.querySelectorAll('ytm-shorts-lockup-view-model-v2, ytm-shorts-lockup-view-model').forEach(decorateShort);
+    updateWatchBar();
   }
 
   let sweepTimer = null;
   function scheduleSweep() {
     clearTimeout(sweepTimer);
     sweepTimer = setTimeout(sweep, SWEEP_MS);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Watch-page resume bar  (only on /watch)
+  // A wider, clickable copy of the thumbnail bar injected under the video title. The FILL shows how
+  // far you'd reached (your stored max) with a marker at that point; CLICKING anywhere seeks the
+  // player to that fraction — so clicking the marker resumes where you left off, clicking elsewhere
+  // scrubs. It sets video.currentTime directly, which seeks IN PLACE (no page reload, unlike a ?t=
+  // URL). A live label under the cursor shows the timestamp you'd jump to. Built from <div>s (not SVG)
+  // so it stretches responsively with rounded ends; all via createElement (Trusted Types blocks
+  // innerHTML). Useful for getting back to your spot after a crash reset the player position.
+  // ---------------------------------------------------------------------------
+  const WATCHBAR_ID = 'ywi-watchbar';
+  function watchAnchor() {
+    return document.querySelector('ytd-watch-metadata #above-the-fold')
+        || document.querySelector('ytd-watch-metadata')
+        || null;
+  }
+  function buildWatchBar() {
+    const wrap = document.createElement('div');
+    wrap.id = WATCHBAR_ID;
+    Object.assign(wrap.style, { position: 'relative', margin: '10px 0 6px', userSelect: 'none' });
+
+    const track = document.createElement('div');
+    Object.assign(track.style, {
+      position: 'relative', height: '10px', borderRadius: '5px', boxSizing: 'border-box',
+      border: '1.5px solid var(--yt-spec-text-secondary, #909090)',
+      background: 'rgba(128,128,128,0.18)', cursor: 'pointer', overflow: 'hidden'
+    });
+    const fill = document.createElement('div');
+    Object.assign(fill.style, { position: 'absolute', left: '0', top: '0', height: '100%', width: '0%' });
+    track.appendChild(fill);
+
+    const marker = document.createElement('div');
+    Object.assign(marker.style, {
+      position: 'absolute', top: '-3px', height: '16px', width: '2px', borderRadius: '1px',
+      background: 'var(--yt-spec-text-primary, #fff)', transform: 'translateX(-1px)',
+      pointerEvents: 'none', display: 'none'
+    });
+    const label = document.createElement('div');
+    Object.assign(label.style, {
+      position: 'absolute', bottom: '18px', padding: '2px 6px', borderRadius: '4px',
+      font: '12px/1.4 Roboto, Arial, sans-serif', whiteSpace: 'nowrap', pointerEvents: 'none',
+      background: 'rgba(0,0,0,0.85)', color: '#fff', transform: 'translateX(-50%)',
+      display: 'none', zIndex: '10'
+    });
+    wrap.append(track, marker, label);
+
+    const fracAt = clientX => {
+      const r = track.getBoundingClientRect();
+      return r.width ? Math.max(0, Math.min(1, (clientX - r.left) / r.width)) : 0;
+    };
+    const durNow = () => {
+      const v = mainVideo();
+      if (v && isFinite(v.duration) && v.duration > 0) return v.duration;
+      return durOf(currentVideoId());                    // fall back to the stored duration
+    };
+    track.addEventListener('click', e => {
+      const v = mainVideo(), d = durNow();
+      if (!v || !d) return;
+      v.currentTime = fracAt(e.clientX) * d;             // seek in place — no reload
+    });
+    const onMove = e => {
+      const f = fracAt(e.clientX), d = durNow();
+      label.style.display = 'block';
+      label.style.left = (f * 100) + '%';
+      label.textContent = d ? fmtTime(f * d) : (Math.round(f * 100) + '%');
+    };
+    track.addEventListener('mousemove', onMove);
+    track.addEventListener('mouseenter', onMove);
+    track.addEventListener('mouseleave', () => { label.style.display = 'none'; });
+
+    wrap._ywi = { fill, marker };
+    return wrap;
+  }
+  function updateWatchBar() {
+    if (location.pathname !== '/watch') {                // navigated off a watch page -> remove it
+      const ex = document.getElementById(WATCHBAR_ID);
+      if (ex) ex.remove();
+      return;
+    }
+    const id = currentVideoId();
+    if (!id) return;
+    const anchor = watchAnchor();
+    if (!anchor) return;
+    let wrap = document.getElementById(WATCHBAR_ID);
+    if (!wrap) wrap = buildWatchBar();
+    if (wrap.parentNode !== anchor) {                    // (re)attach below the title, above the channel row
+      anchor.insertBefore(wrap, anchor.querySelector('#bottom-row') || anchor.firstChild);
+    }
+    const frac = fracOf(id), dur = durOf(id);
+    const { fill, marker } = wrap._ywi;
+    fill.style.width = (frac * 100) + '%';
+    fill.style.background = barColor(frac);
+    if (frac > 0) { marker.style.display = 'block'; marker.style.left = (frac * 100) + '%'; }
+    else marker.style.display = 'none';
+    wrap.title = frac > 0
+      ? `You reached ${Math.round(frac * 100)}%${dur ? ' / ' + fmtTime(frac * dur) : ''} — click to seek`
+      : 'Click to seek';
   }
 
   // ---------------------------------------------------------------------------
