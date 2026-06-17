@@ -40,6 +40,19 @@ Data model: `{ videoId: maxFraction }` (0..1), monotonic — only ever takes the
   earlier version anchored to the views row and *did* drift). List-style cards without a usable
   avatar (e.g. search results) fall back to `placeInGutter` (`left:-GUTTER_OFFSET` of the metadata
   row). Tunables: `ICON_SIZE`, `AVATAR_GAP`, `GUTTER_OFFSET`.
+- **Shorts DOM (verified live 2026-06-16, subscriptions Shorts shelf)**: a third regime. Card is
+  `ytm-shorts-lockup-view-model-v2` which **wraps** an inner `ytm-shorts-lockup-view-model` (older
+  element, still present) — both match, so `decorateShort` normalizes to the outermost via
+  `.closest('…-v2') || .closest('…')` and the badge-exists guard dedupes (verified 1 badge/card after
+  a double sweep). Shorts have **no** `yt-content-metadata-view-model` and **no**
+  `yt-decorated-avatar-view-model`, so neither existing placement applies. Link is
+  `a.reel-item-endpoint[href=/shorts/ID]` (caught by `idFromCard`'s `/shorts/` branch). Title/views are
+  in `.shortsLockupViewModelHostOutsideMetadata`; the view count is the
+  `.shortsLockupViewModelHostOutsideMetadataSubhead` block (gray ~`rgb(170,170,170)`, 14px). **Per user
+  preference the badge sits inline to the LEFT of the view count** (`placeBesideViews` makes that
+  subhead a flex row and prepends the badge, pushing the count right), at `SHORTS_ICON`=18px to match
+  the text, colored to the subhead text color so the ring adapts to theme. (An earlier version overlaid
+  it on the thumbnail top-left; replaced.)
 - **Icon color / `currentColor`**: the empty + half rings use `currentColor`. Inside
   `yt-decorated-avatar-view-model` that inherits **black** (`rgb(0,0,0)`) → invisible on dark theme.
   Fix: at decorate time set `badge.style.color` to the card's metadata-text computed color
@@ -68,5 +81,7 @@ then reload the page. Must be done in the *same profile* the script lives in.
 - **Not yet verified in real use**: watch-page capture (player sampling) and the legacy/search
   regime — both written against confirmed structure but test by actually watching part of a video
   and checking a search page.
-- **Deferred**: Shorts. Different DOM and cramped metadata; may need the icon to push the view count
-  right and may only support a degraded state. Inspect Shorts DOM before implementing.
+- **Shorts decoration (v0.2.0)**: implemented and **verified live** on the subscriptions Shorts shelf
+  — all three states render in the thumbnail top-left and are legible; dedup confirmed. The capture
+  side (player sampling on `/shorts/`) was already wired but is **not yet verified in real use** —
+  test by actually watching part of a Short.

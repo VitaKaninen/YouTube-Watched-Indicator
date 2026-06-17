@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.1.1
+// @version      0.2.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. Empty / half / full circle = unseen / partially / fully watched.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -29,6 +29,8 @@
   const ICON_SIZE      = 22;                 // px icon size
   const AVATAR_GAP     = 16;                 // px gap below the channel avatar (grid cards)
   const GUTTER_OFFSET  = 20;                 // px left of the metadata row (fallback for list cards, e.g. search)
+  const SHORTS_ICON    = 18;                 // px icon size for the inline Shorts badge (sized to the 14px view-count text)
+  const SHORTS_GAP     = 5;                  // px gap between the Shorts badge and the view count
 
   // ---------------------------------------------------------------------------
   // Storage  (in-memory map, debounced flush; monotonic max-fraction per video)
@@ -100,8 +102,8 @@
     for (const k in attrs) el.setAttribute(k, attrs[k]);
     return el;
   }
-  function buildIcon(state) {
-    const svg = svgChild('svg', { viewBox: '0 0 16 16', width: ICON_SIZE, height: ICON_SIZE });
+  function buildIcon(state, size = ICON_SIZE) {
+    const svg = svgChild('svg', { viewBox: '0 0 16 16', width: size, height: size });
     svg.style.display = 'block';
     if (state === 'full') {
       svg.appendChild(svgChild('circle', { cx: 8, cy: 8, r: 7, fill: '#2ba640' }));
@@ -170,6 +172,31 @@
     });
     row.appendChild(badge);
   }
+  // Shorts cards have neither an avatar gutter nor a metadata-view-model, so the badge sits inline to
+  // the LEFT of the view-count subhead (making it a flex row pushes the count right). color is pinned
+  // to the subhead text color so the empty/half ring adapts to theme, as in the other regimes.
+  function placeBesideViews(sub, badge) {
+    sub.style.display = 'flex';
+    sub.style.alignItems = 'center';
+    Object.assign(badge.style, {
+      lineHeight: '0',
+      marginRight: `${SHORTS_GAP}px`,
+      flex: '0 0 auto',
+      color: getComputedStyle(sub).color
+    });
+    sub.insertBefore(badge, sub.firstChild);
+  }
+
+  // Set the badge's icon + tooltip from the stored fraction for `id`. Shared by all card regimes.
+  function applyBadgeState(badge, id, size = ICON_SIZE) {
+    const frac = watched[id] || 0;
+    const state = stateFor(frac);
+    if (badge.dataset.state !== state) {
+      badge.dataset.state = state;
+      badge.replaceChildren(buildIcon(state, size));
+    }
+    badge.title = `${Math.round(frac * 100)}% watched`;
+  }
 
   function decorateRow(row) {
     const card = row.closest(
@@ -192,13 +219,27 @@
       const textEl = row.querySelector('.ytContentMetadataViewModelMetadataText, span') || row;
       badge.style.color = getComputedStyle(textEl).color;
     }
-    const frac = watched[id] || 0;
-    const state = stateFor(frac);
-    if (badge.dataset.state !== state) {
-      badge.dataset.state = state;
-      badge.replaceChildren(buildIcon(state));
+    applyBadgeState(badge, id);
+  }
+
+  // Shorts regime: ytm-shorts-lockup-view-model[-v2] (the -v2 wraps the older inner element). No
+  // metadata-view-model and no avatar, so we overlay the badge on the thumbnail. Normalizing to the
+  // outermost host means the inner+outer matches collapse to one card, so the badge-exists guard
+  // dedupes; a standalone (un-wrapped) inner host still decorates on its own.
+  function decorateShort(el) {
+    const card = el.closest('ytm-shorts-lockup-view-model-v2') || el.closest('ytm-shorts-lockup-view-model');
+    if (!card) return;
+    const id = idFromCard(card);
+    if (!id) return;
+    const sub = card.querySelector('.shortsLockupViewModelHostOutsideMetadataSubhead, .shortsLockupViewModelHostMetadataSubhead');
+    if (!sub) return;                                    // no view-count row -> nowhere to anchor
+    let badge = sub.querySelector('.ywi-badge');
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'ywi-badge';
+      placeBesideViews(sub, badge);
     }
-    badge.title = `${Math.round(frac * 100)}% watched`;
+    applyBadgeState(badge, id, SHORTS_ICON);
   }
 
   function sweep() {
@@ -206,6 +247,8 @@
     document.querySelectorAll('#metadata-line').forEach(decorateRow);
     // New regime: the metadata block is yt-content-metadata-view-model.
     document.querySelectorAll('yt-content-metadata-view-model').forEach(decorateRow);
+    // Shorts regime: distinct DOM, badge overlaid on the thumbnail.
+    document.querySelectorAll('ytm-shorts-lockup-view-model-v2, ytm-shorts-lockup-view-model').forEach(decorateShort);
   }
 
   let sweepTimer = null;
