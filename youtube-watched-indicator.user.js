@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.1.0
+// @version      0.1.1
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. Empty / half / full circle = unseen / partially / fully watched.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -10,8 +10,8 @@
 // @grant        GM_registerMenuCommand
 // @run-at       document-idle
 // @noframes
-// @updateURL    https://raw.githubusercontent.com/VitaKaninen/YouTube-Watched-Indicator/native-mode/youtube-watched-indicator.user.js
-// @downloadURL  https://raw.githubusercontent.com/VitaKaninen/YouTube-Watched-Indicator/native-mode/youtube-watched-indicator.user.js
+// @updateURL    https://raw.githubusercontent.com/VitaKaninen/YouTube-Watched-Indicator/main/youtube-watched-indicator.user.js
+// @downloadURL  https://raw.githubusercontent.com/VitaKaninen/YouTube-Watched-Indicator/main/youtube-watched-indicator.user.js
 // ==/UserScript==
 
 (function () {
