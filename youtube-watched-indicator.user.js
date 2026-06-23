@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.17.0
+// @version      0.18.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar (gray track, red->green fill) shows the exact watched fraction; hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place. Backfills "already opened" marks from your Liked videos list (videos liked before install), via YouTube's own session API — no API key needed.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -291,9 +291,13 @@
     const ix = BAR_SW, iy = BAR_SW, iw = BAR_W - 2 * BAR_SW, ih = BAR_H - 2 * BAR_SW, ir = ih / 2;
     // Gray track filling the whole interior, drawn first so the colored fill below paints over it up to
     // the watched fraction (leaving gray for the unwatched remainder — the usual progress-bar look).
-    svg.appendChild(svgChild('rect', {
-      x: ix, y: iy, width: iw, height: ih, rx: ir, ry: ir, fill: BAR_BG
-    }));
+    // Only shown once the video is clicked/watched; a never-touched card stays a bare dim outline (no
+    // gray), so the track itself signals "you've at least opened this".
+    if (clicked) {
+      svg.appendChild(svgChild('rect', {
+        x: ix, y: iy, width: iw, height: ih, rx: ir, ry: ir, fill: BAR_BG
+      }));
+    }
     if (frac > 0) {
       const id = 'ywi-clip-' + (++clipSeq);
       const defs = svgChild('defs', {});

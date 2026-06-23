@@ -6,7 +6,10 @@ elongated) whose **fill width = the exact stored watched fraction** and whose **
 red → yellow → green** as it fills (linear HSL hue interp 0°→120°, `barColor()`). As of **v0.17.0** the
 pill interior is a **gray track** (`BAR_BG`, theme-neutral semi-transparent gray, drawn first in
 `buildIcon`); the colored fill paints over it up to the watched fraction, leaving gray for the unwatched
-remainder (standard progress-bar look). The watch-page resume bar reuses the same `BAR_BG`. It replaced the old
+remainder (standard progress-bar look). The watch-page resume bar reuses the same `BAR_BG`. As of
+**v0.18.0** the gray track is drawn **only when the video is clicked/watched** (`clicked` in `buildIcon`);
+a never-touched card stays a bare dim outline with no gray, so the track itself signals "you've at least
+opened this". It replaced the old
 three-state empty ○ / half-filled red ◐ / full green ● circle. The `T_PARTIAL`/`T_FULL` thresholds and
 `stateFor()` survive only as a coarse gate for the live re-sweep during capture (see below) — they no
 longer drive what's drawn; the bar always renders the precise fraction.
