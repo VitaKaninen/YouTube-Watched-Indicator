@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.19.0
+// @version      0.20.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place. Videos in your Liked list that you haven't otherwise touched get a gray-filled pill (backfilled via YouTube's own session API — no API key needed), so you can spot ones you liked before installing.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -41,7 +41,7 @@
   const LIKED_TS_KEY     = 'ywi.liked.fetchedAt';   // GM key: ms timestamp of the last successful backfill
   const LIKED_REFRESH_MS = 24 * 60 * 60 * 1000;     // auto-refresh at most once per 24h (menu command forces it)
   const LIKED_VER_KEY    = 'ywi.liked.logicVer';    // GM key: which backfill-logic version last ran
-  const LIKED_VER        = 2;                        // bump when applyLiked's logic changes -> forces a one-time re-run (v2 = liked stored as `k`, heals the v0.17-0.18 `c` mislabel)
+  const LIKED_VER        = 3;                        // bump when the backfill logic changes -> forces a one-time re-run (v2 = liked stored as `k`, heals the v0.17-0.18 `c` mislabel; v3 = parser also reads the new lockupViewModel item shape)
 
   // ---------------------------------------------------------------------------
   // Storage  (in-memory map, debounced flush; monotonic max-fraction per video)
@@ -674,12 +674,19 @@
     if (!res.ok) throw new Error('browse HTTP ' + res.status);
     return res.json();
   }
-  // Walk the response tree collecting every playlistVideoRenderer videoId and any continuation token,
-  // rather than navigating brittle fixed paths (the response shape shifts between initial + continuation
-  // pages and across YouTube revisions).
+  const isVid = s => typeof s === 'string' && /^[\w-]{11}$/.test(s);
+  // Walk the response tree collecting every liked videoId and any continuation token, rather than
+  // navigating brittle fixed paths (the response shape shifts between initial + continuation pages and
+  // across YouTube revisions). Handles BOTH item shapes: the legacy `playlistVideoRenderer` AND the newer
+  // `lockupViewModel` (YouTube migrated playlist items to view-models — if only the old shape is matched
+  // the fetch "succeeds" but finds zero videos). As a last resort also picks up bare `videoId` fields.
   function collectLiked(obj, ids, tokens) {
     if (!obj || typeof obj !== 'object') return;
-    if (obj.playlistVideoRenderer && obj.playlistVideoRenderer.videoId) ids.add(obj.playlistVideoRenderer.videoId);
+    if (obj.playlistVideoRenderer && isVid(obj.playlistVideoRenderer.videoId)) ids.add(obj.playlistVideoRenderer.videoId);
+    if (obj.lockupViewModel && isVid(obj.lockupViewModel.contentId)
+        && (!obj.lockupViewModel.contentType || obj.lockupViewModel.contentType === 'LOCKUP_CONTENT_TYPE_VIDEO')) {
+      ids.add(obj.lockupViewModel.contentId);
+    }
     const tok = obj.continuationItemRenderer
       && obj.continuationItemRenderer.continuationEndpoint
       && obj.continuationItemRenderer.continuationEndpoint.continuationCommand
@@ -753,6 +760,29 @@
   // Maintenance helpers in the Tampermonkey menu.
   GM_registerMenuCommand('Mark Liked videos (gray pill) now', () => {
     refreshLiked(true).then(() => console.log('[YWI] liked backfill: done'));
+  });
+  // TEMP DIAGNOSTIC (added v0.20.0 to debug "gray pills don't show") — remove once the liked backfill is
+  // confirmed working. Logs exactly what the innertube Liked-playlist call returns so we can see whether
+  // the key/auth are found, the HTTP status, and which item renderers come back.
+  GM_registerMenuCommand('YWI: diagnose Liked fetch (console)', async () => {
+    try {
+      console.log('[YWI diag] innertube key:', innertubeKey() ? 'FOUND' : 'MISSING',
+                  '| ytcfg via unsafeWindow:', (typeof unsafeWindow !== 'undefined' && unsafeWindow.ytcfg) ? 'yes' : 'no');
+      console.log('[YWI diag] SAPISID auth header:', (await sapisidHash(location.origin)) ? 'BUILT' : 'MISSING (no SAPISID cookie)');
+      const data = await innertubeBrowse({ browseId: 'VLLL' });
+      const ids = new Set(), tokens = [];
+      collectLiked(data, ids, tokens);
+      const kinds = {};
+      (function scan(o) {
+        if (!o || typeof o !== 'object') return;
+        for (const k in o) { if (/(Renderer|ViewModel)$/.test(k)) kinds[k] = (kinds[k] || 0) + 1; scan(o[k]); }
+      })(data);
+      console.log('[YWI diag] first page -> video ids parsed:', ids.size, '| continuation tokens:', tokens.length);
+      console.log('[YWI diag] item renderer/view-model kinds in first page:', kinds);
+      console.log('[YWI diag] full first-page response object follows (expand to inspect):', data);
+    } catch (e) {
+      console.error('[YWI diag] FETCH ERROR:', e);
+    }
   });
   GM_registerMenuCommand('Export watched data (JSON to console)', () => {
     // Read straight from storage (and fold into memory) so the dump always reflects what's actually
