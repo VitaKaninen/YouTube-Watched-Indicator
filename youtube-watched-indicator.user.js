@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.14.0
+// @version      0.15.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -360,6 +360,27 @@
     });
     row.appendChild(badge);
   }
+  // New-regime cards (yt-content-metadata-view-model) whose channel avatar isn't actually rendered:
+  // a channel's own /videos grid omits the per-video avatar entirely, and the watch-page recommendation
+  // lockups keep a yt-decorated-avatar-view-model in the DOM but collapsed to 0x0. In both cases
+  // placeUnderAvatar anchors an absolutely-positioned badge to nothing (off at the gutter / at 0,0 ->
+  // invisible). Instead place the badge inline at the START of the metadata block — left of its first
+  // line (the view count on a channel grid, the channel name in the watch sidebar). Same inline look as
+  // the Shorts badge; always on-screen and theme-colored.
+  function placeBesideMeta(vm, badge) {
+    const line = vm.querySelector(':scope > div') || vm;
+    Object.assign(badge.style, {
+      display: 'inline-flex',
+      alignItems: 'center',
+      verticalAlign: 'middle',
+      marginRight: `${SHORTS_GAP}px`,
+      flex: '0 0 auto',
+      pointerEvents: 'auto',          // receive hover so the title tooltip shows
+      lineHeight: '0',
+      color: 'inherit'
+    });
+    line.insertBefore(badge, line.firstChild);
+  }
   // Shorts cards have neither an avatar gutter nor a metadata-view-model, so the badge sits inline to
   // the LEFT of the view-count subhead (making it a flex row pushes the count right). color is pinned
   // to the subhead text color so the empty/half ring adapts to theme, as in the other regimes.
@@ -402,8 +423,13 @@
     if (!badge) {
       badge = document.createElement('span');
       badge.className = 'ywi-badge';
+      // Prefer the avatar gutter only when the avatar is genuinely rendered (non-zero box). YouTube
+      // now omits the avatar on channel-grid cards and collapses it to 0x0 in watch-sidebar lockups,
+      // so an unguarded placeUnderAvatar anchored to it renders the badge invisibly. New-regime cards
+      // fall back to an inline badge in the metadata row; legacy list cards keep the gutter.
       const avatar = avatarOf(card);
-      if (avatar) placeUnderAvatar(avatar, badge);
+      if (avatar && avatar.offsetWidth > 0 && avatar.offsetHeight > 0) placeUnderAvatar(avatar, badge);
+      else if (row.matches && row.matches('yt-content-metadata-view-model')) placeBesideMeta(row, badge);
       else placeInGutter(row, badge);
       // Pin the ring color to the card's metadata-text color. Otherwise currentColor inherits
       // from the anchor element — black inside the avatar — and the empty/half ring vanishes

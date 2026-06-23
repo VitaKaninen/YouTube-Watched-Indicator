@@ -143,12 +143,23 @@ existed is gone.
 - **Ads share the player element**: during ads `currentTime/duration` refer to the *ad*. Skip
   sampling when `#movie_player` / `.html5-video-player` has the `ad-showing` class.
 - **Live streams**: `duration` is `Infinity` — guard against non-finite duration.
-- **Icon placement**: on grid cards the badge is anchored **under the channel avatar**
-  (`yt-decorated-avatar-view-model`), centered, `top:100%` + `AVATAR_GAP`px. The avatar's position is
-  fixed regardless of title wrap, so the icon no longer drifts when a title spans two lines (an
-  earlier version anchored to the views row and *did* drift). List-style cards without a usable
-  avatar (e.g. search results) fall back to `placeInGutter` (`left:-GUTTER_OFFSET` of the metadata
-  row). Tunables: `ICON_SIZE`, `AVATAR_GAP`, `GUTTER_OFFSET`.
+- **Icon placement (three paths; avatar path is now mostly dead — verified live 2026-06-22)**:
+  `decorateRow` picks among them in order:
+  1. `placeUnderAvatar` — under the channel avatar (`yt-decorated-avatar-view-model`), centered,
+     `top:100%` + `AVATAR_GAP`px. Avatar position is fixed regardless of title wrap so the icon
+     doesn't drift on a two-line title. **Only taken when the avatar is genuinely rendered** — guarded
+     by `avatar.offsetWidth/Height > 0`. As of 2026-06-22 YouTube **no longer renders a per-video
+     avatar** on channel-grid cards (it's absent) and **collapses it to 0×0** in watch-sidebar
+     recommendation lockups, so this path rarely fires now; the guard is what stops the old code from
+     anchoring an absolutely-positioned badge to a zero-size box (→ badge off in the gutter / at 0,0,
+     invisible — the exact bug reported for channel pages and watch-page recommendations).
+  2. `placeBesideMeta` (**v0.15.0**) — new-regime (`yt-content-metadata-view-model`) cards with no
+     usable avatar: badge sits **inline at the start of the first metadata line** (`:scope > div`),
+     i.e. left of the view count on a channel `/videos` grid, left of the channel name in the watch
+     sidebar. Same inline `inline-flex` look as the Shorts badge; always on-screen, theme-colored.
+  3. `placeInGutter` — legacy list cards with `#metadata-line` (e.g. search results):
+     `left:-GUTTER_OFFSET` of the metadata row.
+  Tunables: `ICON_SIZE`, `AVATAR_GAP`, `GUTTER_OFFSET`, `SHORTS_GAP` (inline gap).
 - **Shorts DOM (verified live 2026-06-16, subscriptions Shorts shelf)**: a third regime. Card is
   `ytm-shorts-lockup-view-model-v2` which **wraps** an inner `ytm-shorts-lockup-view-model` (older
   element, still present) — both match, so `decorateShort` normalizes to the outermost via
