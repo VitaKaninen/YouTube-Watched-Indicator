@@ -3,13 +3,7 @@
 Tampermonkey userscript that puts a watched-state icon on YouTube video thumbnails. As of **v0.6.0**
 the icon is a **pill-shaped progress bar** (same `currentColor` rounded outline as the old ring, just
 elongated) whose **fill width = the exact stored watched fraction** and whose **fill color sweeps
-red → yellow → green** as it fills (linear HSL hue interp 0°→120°, `barColor()`). As of **v0.17.0** the
-pill interior is a **gray track** (`BAR_BG`, theme-neutral semi-transparent gray, drawn first in
-`buildIcon`); the colored fill paints over it up to the watched fraction, leaving gray for the unwatched
-remainder (standard progress-bar look). The watch-page resume bar reuses the same `BAR_BG`. As of
-**v0.18.0** the gray track is drawn **only when the video is clicked/watched** (`clicked` in `buildIcon`);
-a never-touched card stays a bare dim outline with no gray, so the track itself signals "you've at least
-opened this". It replaced the old
+red → yellow → green** as it fills (linear HSL hue interp 0°→120°, `barColor()`). It replaced the old
 three-state empty ○ / half-filled red ◐ / full green ● circle. The `T_PARTIAL`/`T_FULL` thresholds and
 `stateFor()` survive only as a coarse gate for the live re-sweep during capture (see below) — they no
 longer drive what's drawn; the bar always renders the precise fraction.
@@ -28,7 +22,7 @@ and stores it locally in Tampermonkey. Consequences, all accepted by the user:
 - **This-browser-only** — data lives in this profile's GM storage; no cross-device sync.
 - **Fully local** — nothing sent to Google; consistent with the user's history-off stance.
 
-Data model (**v0.10.0**): `{ videoId: { f, l, t, d, c } }`:
+Data model (**v0.10.0**, plus `k` in **v0.19.0**): `{ videoId: { f, l, t, d, c, k } }`:
 - `f` — **furthest** fraction (0..1), monotonic high-water mark (only ever increases). Drives the
   thumbnail bar fill and the watch-page green fill.
 - `l` — **last** fraction (0..1), the most recent playhead position; **not** monotonic (a seek-back
@@ -39,9 +33,15 @@ Data model (**v0.10.0**): `{ videoId: { f, l, t, d, c } }`:
   becomes known (0 until then). Needed for the mm:ss timestamps.
 - `c` — **clicked/opened** flag (1 once you've opened the video from a listing, even if never watched);
   sticky, OR-merged across copies. Dims the empty bar's outline until set (see below).
+- `k` — **liked** flag (**v0.19.0**; 1 if in the user's Liked playlist, set by the liked-backfill for
+  videos not otherwise in storage); sticky, OR-merged. Renders a **gray-filled pill** (`BAR_BG`) — but
+  ONLY while the video is neither clicked nor watched (`likedOnly` in `applyBadgeState` = `k && !c &&
+  !(f>0)`); once clicked/watched the normal rules take over. It's the "you liked this before install"
+  indicator and is **distinct** from `c` — an earlier attempt (v0.17-0.18) wrongly stored liked as `c`,
+  which `applyLiked` now heals (see the liked-backfill section).
 
 **Legacy compat:** older entries were a bare number (just the fraction); `normEntry()` upgrades any
-`number` to `{ f, l: f, t: 0, d: 0, c: 0 }` on read, so old data keeps working — `l` defaults to `f` and
+`number` to `{ f, l: f, t: 0, d: 0, c: 0, k: 0 }` on read, so old data keeps working — `l` defaults to `f` and
 the timestamp won't show until `d` is recaptured. All storage helpers (`fracOf`/`lastOf`/`durOf`/`mergeInto`/
 `record`) operate on the object shape; the in-memory map is normalized to objects in `parseStore()`.
 
@@ -82,12 +82,23 @@ later" tabs and forgets which they've already opened.
   writes `{}`). The real-world regression we hit (v0.12.0) came from **a stale OLD-version tab** — see
   the durable-mirror gotcha below.
 
-**Liked-videos backfill (v0.17.0):** to fill the "I at least opened this" gap for videos watched/liked
-*before* install, the script pulls the user's **Liked playlist** and marks any liked video **not already
-in the watched map** as clicked (`{f:0,l:0,t:0,d:0,c:1}`). Existing entries are **left untouched** —
-measured progress and real clicks always win (this is intentional per the user: "if it's already in
-storage, act normally; only fill gaps"). It is **not** a separate "liked" marker — liked just feeds the
-existing clicked outline.
+**Liked-videos backfill (v0.17.0; redesigned v0.19.0):** to flag videos liked *before* install, the
+script pulls the user's **Liked playlist** and marks any liked video **not already in the watched map**
+with the `k` (liked) flag (`{f:0,l:0,t:0,d:0,c:0,k:1}`) → renders as a **gray-filled pill**. Existing
+entries (clicked/watched) are **left untouched** — measured progress and real clicks always win
+(intentional per the user: "if it's neither clicked nor watched but IS liked, show gray; otherwise
+normal rules"). The gray is *only* for liked-but-untouched videos; it is **not** a general progress-bar
+track (an earlier try put gray behind every pill — rejected — see below).
+- **Migration heal (v0.19.0):** v0.17-0.18 wrongly stored liked videos as **clicked** (`c:1`), which is
+  indistinguishable in storage from a real click. `applyLiked` heals it: a *bare* click (`c:1`, no `f`/
+  `l`/`d`) on a confirmed-liked video is relabeled to `k:1, c:0`. Watched videos and clicks carrying real
+  data are untouched. A genuine pre-fix click on a liked video flips to gray too (can't be told apart) —
+  rare, cosmetic. The heal auto-runs once on upgrade via `LIKED_VER_KEY`/`LIKED_VER` (bump `LIKED_VER`
+  when `applyLiked`'s logic changes to force a one-time re-run, independent of the 24h throttle).
+- **Rejected approaches (this is why the design is what it is — don't re-try them):** (1) gray as a track
+  behind *every* pill (v0.17) — user: too many videos got gray; (2) gray only on clicked/watched (v0.18)
+  — user wanted gray *specifically* and *only* for liked-not-otherwise-touched videos. Final: gray ⟺
+  `likedOnly`.
 - **No Google API key.** It calls YouTube's own internal **innertube** browse API (`POST
   /youtubei/v1/browse`, `browseId:'VLLL'` = `VL`+`LL`), reusing the page's `INNERTUBE_API_KEY` +
   `INNERTUBE_CONTEXT` from **`unsafeWindow.ytcfg`** (added `@grant unsafeWindow`; falls back to scraping
@@ -103,9 +114,9 @@ existing clicked outline.
   NOT fixed-path navigation, because the shape differs between the initial page and continuation pages
   and drifts across YT revisions. Loop guarded at 1000 pages (~100k videos).
 - **Cadence:** auto-runs once on load (5s delay so ytcfg/cookies are ready), **throttled to once/24h**
-  via `LIKED_TS_KEY`; on failure the timestamp is left untouched so it retries next run. Menu command
-  *"Backfill 'opened' marks from Liked videos now"* forces it. **Reset** zeroes `LIKED_TS_KEY` so the
-  next load re-backfills.
+  via `LIKED_TS_KEY` (overridden by a `LIKED_VER` bump, which forces one re-run regardless); on failure
+  both keys are left untouched so it retries next run. Menu command *"Mark Liked videos (gray pill) now"*
+  forces it. **Reset** zeroes `LIKED_TS_KEY` *and* `LIKED_VER_KEY` so the next load re-backfills.
 
 **Stale-tab field-stripping + durable localStorage mirror (v0.12.0):** symptom was a clicked entry
 losing only `c` (`{f,l,t,d}` intact, `c:1`→`c:0`) with no edit, after a wait+reload. Cause: the user

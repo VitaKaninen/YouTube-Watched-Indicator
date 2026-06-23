@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.18.0
-// @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar (gray track, red->green fill) shows the exact watched fraction; hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place. Backfills "already opened" marks from your Liked videos list (videos liked before install), via YouTube's own session API — no API key needed.
+// @version      0.19.0
+// @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place. Videos in your Liked list that you haven't otherwise touched get a gray-filled pill (backfilled via YouTube's own session API — no API key needed), so you can spot ones you liked before installing.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
 // @grant        GM_setValue
@@ -33,13 +33,15 @@
   const GUTTER_OFFSET  = 24;                 // px left of the metadata row (fallback for list cards, e.g. search)
   const SHORTS_ICON    = 12;                 // px bar height for the inline Shorts badge (sized to the 14px view-count text)
   const SHORTS_GAP     = 5;                  // px gap between the Shorts badge and the view count
-  const BAR_BG         = 'rgba(128,128,128,0.35)';  // gray "track" filling the pill interior; the red->green fill paints over it as the video is watched (theme-neutral semi-transparent gray)
+  const BAR_BG         = 'rgba(128,128,128,0.7)';   // gray fill for a LIKED-but-untouched pill (the liked-backfill indicator); theme-neutral medium gray, opaque enough to read on light + dark
 
   // Liked-videos backfill: pull your Liked playlist via YouTube's own session API and mark any liked
   // video NOT already in storage as "clicked" (so videos you watched/liked before install still get the
   // opened-indicator outline). No Google API key — reuses the page's innertube key + your cookies.
   const LIKED_TS_KEY     = 'ywi.liked.fetchedAt';   // GM key: ms timestamp of the last successful backfill
   const LIKED_REFRESH_MS = 24 * 60 * 60 * 1000;     // auto-refresh at most once per 24h (menu command forces it)
+  const LIKED_VER_KEY    = 'ywi.liked.logicVer';    // GM key: which backfill-logic version last ran
+  const LIKED_VER        = 2;                        // bump when applyLiked's logic changes -> forces a one-time re-run (v2 = liked stored as `k`, heals the v0.17-0.18 `c` mislabel)
 
   // ---------------------------------------------------------------------------
   // Storage  (in-memory map, debounced flush; monotonic max-fraction per video)
@@ -54,13 +56,16 @@
   // so old data keeps working — l defaults to f (only known position), duration stays 0 until recaptured.
   // `c` = clicked/opened flag (1 once you've opened the video from a listing, even if you never watched
   // it — e.g. a deferred/lazy-loaded new tab). 0 = never clicked.
+  // `k` = liked flag (1 if the video is in your Liked playlist; set by the liked-backfill for videos not
+  // otherwise in storage). Drives the gray-filled pill that flags "liked before install" — but ONLY while
+  // the video is neither clicked nor watched; once you click/watch it, the normal rules take over.
   function normEntry(v) {
-    if (typeof v === 'number') return { f: v, l: v, t: 0, d: 0, c: 0 };
+    if (typeof v === 'number') return { f: v, l: v, t: 0, d: 0, c: 0, k: 0 };
     if (v && typeof v === 'object') {
       const f = +v.f || 0;
-      return { f, l: isFinite(v.l) ? +v.l : f, t: +v.t || 0, d: (isFinite(v.d) && v.d > 0) ? +v.d : 0, c: v.c ? 1 : 0 };
+      return { f, l: isFinite(v.l) ? +v.l : f, t: +v.t || 0, d: (isFinite(v.d) && v.d > 0) ? +v.d : 0, c: v.c ? 1 : 0, k: v.k ? 1 : 0 };
     }
-    return { f: 0, l: 0, t: 0, d: 0, c: 0 };
+    return { f: 0, l: 0, t: 0, d: 0, c: 0, k: 0 };
   }
   function parseStore(raw) {
     let o; try { o = JSON.parse(raw || '{}') || {}; } catch (e) { return {}; }
@@ -79,11 +84,12 @@
     let changed = false;
     for (const id in other) {
       const o = other[id], c = watched[id];
-      if (!c) { watched[id] = { f: o.f, l: o.l, t: o.t, d: o.d, c: o.c }; changed = true; continue; }
+      if (!c) { watched[id] = { f: o.f, l: o.l, t: o.t, d: o.d, c: o.c, k: o.k }; changed = true; continue; }
       if (o.f > c.f) { c.f = o.f; changed = true; }
       if (!c.d && o.d) { c.d = o.d; changed = true; }
       if (o.t > c.t) { c.l = o.l; c.t = o.t; changed = true; }
       if (o.c && !c.c) { c.c = 1; changed = true; }       // clicked is sticky — OR across copies
+      if (o.k && !c.k) { c.k = 1; changed = true; }       // liked is sticky — OR across copies
     }
     return changed;
   }
@@ -141,7 +147,7 @@
   }
   function record(id, frac, dur) {
     if (!id || !(frac > 0)) return;
-    const e = watched[id] || (watched[id] = { f: 0, l: 0, t: 0, d: 0, c: 0 });
+    const e = watched[id] || (watched[id] = { f: 0, l: 0, t: 0, d: 0, c: 0, k: 0 });
     const r = Math.round(frac * 1000) / 1000;             // 0.001 precision is plenty
     let changed = false;
     if (r > e.f) {                                         // furthest: monotonic high-water mark
@@ -283,17 +289,16 @@
   const BAR_W = 44, BAR_H = 14, BAR_SW = 2;  // viewBox units; on-screen size set by `size` (= height)
   const OUTLINE_CLICKED = 0.75, OUTLINE_UNCLICKED = 0.25;  // outline opacity: brighter once clicked, dim until then
   let clipSeq = 0;
-  function buildIcon(frac, size = ICON_SIZE, clicked = true) {
+  function buildIcon(frac, size = ICON_SIZE, clicked = true, likedOnly = false) {
     const svg = svgChild('svg', {
       viewBox: `0 0 ${BAR_W} ${BAR_H}`, width: size * BAR_W / BAR_H, height: size
     });
     svg.style.display = 'block';
     const ix = BAR_SW, iy = BAR_SW, iw = BAR_W - 2 * BAR_SW, ih = BAR_H - 2 * BAR_SW, ir = ih / 2;
-    // Gray track filling the whole interior, drawn first so the colored fill below paints over it up to
-    // the watched fraction (leaving gray for the unwatched remainder — the usual progress-bar look).
-    // Only shown once the video is clicked/watched; a never-touched card stays a bare dim outline (no
-    // gray), so the track itself signals "you've at least opened this".
-    if (clicked) {
+    // Gray-filled pill for a LIKED-but-untouched video (in your Liked list, never clicked or watched) —
+    // flags videos you liked before installing. Every other state follows the original rules: no gray
+    // fill, just the colored watched fraction (if any) over a transparent interior.
+    if (likedOnly) {
       svg.appendChild(svgChild('rect', {
         x: ix, y: iy, width: iw, height: ih, rx: ir, ry: ir, fill: BAR_BG
       }));
@@ -419,17 +424,20 @@
 
   // Set the badge's icon + tooltip from the stored fraction for `id`. Shared by all card regimes.
   function applyBadgeState(badge, id, size = ICON_SIZE) {
+    const e = watched[id];
     const frac = fracOf(id), dur = durOf(id);
-    const clicked = ((watched[id] && watched[id].c) ? 1 : 0) || frac > 0;  // watched implies clicked
-    const key = Math.round(frac * 1000) + ':' + size + ':' + (clicked ? 1 : 0);  // rebuild only when the rendered bar changes
+    const clicked = ((e && e.c) ? 1 : 0) || frac > 0;       // watched implies clicked
+    const likedOnly = !!(e && e.k && !e.c && !(frac > 0));  // in Liked list but never clicked/watched -> gray pill
+    const key = Math.round(frac * 1000) + ':' + size + ':' + (clicked ? 1 : 0) + ':' + (likedOnly ? 1 : 0);  // rebuild only when the rendered bar changes
     if (badge.dataset.fkey !== key) {
       badge.dataset.fkey = key;
-      badge.replaceChildren(buildIcon(frac, size, !!clicked));
+      badge.replaceChildren(buildIcon(frac, size, !!clicked, likedOnly));
     }
     // Tooltip on hover: "57% / 4:40" — the position you'd reached. Duration is only known once the
-    // video has been watched at least once on this device; until then just show the percentage.
+    // video has been watched at least once on this device; until then just show the percentage. A
+    // liked-but-untouched video says so instead of "0% watched".
     const pct = Math.round(frac * 100);
-    badge.title = dur > 0 ? `${pct}% / ${fmtTime(frac * dur)}` : `${pct}% watched`;
+    badge.title = likedOnly ? 'In your Liked playlist' : (dur > 0 ? `${pct}% / ${fmtTime(frac * dur)}` : `${pct}% watched`);
   }
 
   function decorateRow(row) {
@@ -525,7 +533,7 @@
     Object.assign(track.style, {
       position: 'relative', height: '10px', borderRadius: '5px', boxSizing: 'border-box',
       border: '1.5px solid var(--yt-spec-text-secondary, #909090)',
-      background: BAR_BG, cursor: 'pointer', overflow: 'hidden'
+      background: 'rgba(128,128,128,0.18)', cursor: 'pointer', overflow: 'hidden'
     });
     const fill = document.createElement('div');
     Object.assign(fill.style, { position: 'absolute', left: '0', top: '0', height: '100%', width: '0%' });
@@ -600,7 +608,7 @@
   }
   function markClicked(id) {
     if (!id) return;
-    const e = watched[id] || (watched[id] = { f: 0, l: 0, t: 0, d: 0, c: 0 });
+    const e = watched[id] || (watched[id] = { f: 0, l: 0, t: 0, d: 0, c: 0, k: 0 });
     // Persist IMMEDIATELY, not via the throttled timer: a click is a rare discrete event, and the page
     // may navigate / reload / open a new tab right after — a 1.5s deferred flush can be lost in that
     // window (the symptom: clicked outlines vanish on reload). flush() is a read-merge-write, so this is
@@ -696,7 +704,15 @@
   function applyLiked(ids) {
     let changed = false;
     ids.forEach(id => {
-      if (!watched[id]) { watched[id] = { f: 0, l: 0, t: 0, d: 0, c: 1 }; changed = true; }  // gap-fill only
+      const e = watched[id];
+      // Gap-fill: a liked video with no existing entry gets the `k` (liked) flag -> renders as a gray pill.
+      if (!e) { watched[id] = { f: 0, l: 0, t: 0, d: 0, c: 0, k: 1 }; changed = true; return; }
+      // Heal the earlier (v0.17-v0.18) backfill, which mislabeled liked videos as CLICKED (c:1). A bare
+      // click with no real watch data, on a video now confirmed liked, was almost certainly that backfill
+      // -> relabel it liked so it shows gray. Genuinely watched videos (f>0) and clicks carrying real data
+      // are left untouched -> normal rules. (A real pre-fix click on a liked video is indistinguishable
+      // from the backfill, so it flips to gray too — rare and cosmetically minor.)
+      if (e.c && !e.k && !(e.f > 0) && !(e.l > 0) && !e.d) { e.c = 0; e.k = 1; changed = true; }
     });
     if (changed) { dirty = true; flush(); scheduleSweep(); }
     return changed;
@@ -705,13 +721,16 @@
   async function refreshLiked(force) {
     if (likedBusy) return;
     const last = +GM_getValue(LIKED_TS_KEY, 0) || 0;
-    if (!force && Date.now() - last < LIKED_REFRESH_MS) return;                // throttle automatic runs
+    const stale = Date.now() - last >= LIKED_REFRESH_MS;
+    const verBumped = +GM_getValue(LIKED_VER_KEY, 0) !== LIKED_VER;            // logic changed -> re-run once
+    if (!force && !stale && !verBumped) return;                               // throttle automatic runs
     likedBusy = true;
     try {
       const ids = await fetchLikedIds();
       const added = applyLiked(ids);
       GM_setValue(LIKED_TS_KEY, Date.now());
-      console.log(`[YWI] liked backfill: ${ids.size} liked videos found, ${added ? 'added new gap-fill marks' : 'no new gaps'}`);
+      GM_setValue(LIKED_VER_KEY, LIKED_VER);
+      console.log(`[YWI] liked backfill: ${ids.size} liked videos found, ${added ? 'updated gray-pill marks' : 'no changes'}`);
     } catch (e) {
       console.warn('[YWI] liked backfill failed (will retry next run):', e);   // leave timestamp untouched -> retries
     } finally {
@@ -732,7 +751,7 @@
   setTimeout(() => refreshLiked(false), 5000);
 
   // Maintenance helpers in the Tampermonkey menu.
-  GM_registerMenuCommand('Backfill "opened" marks from Liked videos now', () => {
+  GM_registerMenuCommand('Mark Liked videos (gray pill) now', () => {
     refreshLiked(true).then(() => console.log('[YWI] liked backfill: done'));
   });
   GM_registerMenuCommand('Export watched data (JSON to console)', () => {
@@ -744,7 +763,7 @@
   GM_registerMenuCommand('Reset all watched data', () => {
     if (confirm('Erase all locally-stored watched data for this script?')) {
       // Write empty directly — flush() does a read-merge-write and would fold the old data right back.
-      watched = {}; dirty = false; GM_setValue(STORE_KEY, '{}'); lsSet('{}'); GM_setValue(LIKED_TS_KEY, 0); scheduleSweep();
+      watched = {}; dirty = false; GM_setValue(STORE_KEY, '{}'); lsSet('{}'); GM_setValue(LIKED_TS_KEY, 0); GM_setValue(LIKED_VER_KEY, 0); scheduleSweep();
     }
   });
 })();
