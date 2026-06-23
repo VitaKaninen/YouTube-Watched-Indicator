@@ -3,7 +3,10 @@
 Tampermonkey userscript that puts a watched-state icon on YouTube video thumbnails. As of **v0.6.0**
 the icon is a **pill-shaped progress bar** (same `currentColor` rounded outline as the old ring, just
 elongated) whose **fill width = the exact stored watched fraction** and whose **fill color sweeps
-red → yellow → green** as it fills (linear HSL hue interp 0°→120°, `barColor()`). It replaced the old
+red → yellow → green** as it fills (linear HSL hue interp 0°→120°, `barColor()`). As of **v0.17.0** the
+pill interior is a **gray track** (`BAR_BG`, theme-neutral semi-transparent gray, drawn first in
+`buildIcon`); the colored fill paints over it up to the watched fraction, leaving gray for the unwatched
+remainder (standard progress-bar look). The watch-page resume bar reuses the same `BAR_BG`. It replaced the old
 three-state empty ○ / half-filled red ◐ / full green ● circle. The `T_PARTIAL`/`T_FULL` thresholds and
 `stateFor()` survive only as a coarse gate for the live re-sweep during capture (see below) — they no
 longer drive what's drawn; the bar always renders the precise fraction.
@@ -75,6 +78,31 @@ later" tabs and forgets which they've already opened.
 - Within one script version storage never regresses `c` (read-merge-write OR-merges it; only Reset
   writes `{}`). The real-world regression we hit (v0.12.0) came from **a stale OLD-version tab** — see
   the durable-mirror gotcha below.
+
+**Liked-videos backfill (v0.17.0):** to fill the "I at least opened this" gap for videos watched/liked
+*before* install, the script pulls the user's **Liked playlist** and marks any liked video **not already
+in the watched map** as clicked (`{f:0,l:0,t:0,d:0,c:1}`). Existing entries are **left untouched** —
+measured progress and real clicks always win (this is intentional per the user: "if it's already in
+storage, act normally; only fill gaps"). It is **not** a separate "liked" marker — liked just feeds the
+existing clicked outline.
+- **No Google API key.** It calls YouTube's own internal **innertube** browse API (`POST
+  /youtubei/v1/browse`, `browseId:'VLLL'` = `VL`+`LL`), reusing the page's `INNERTUBE_API_KEY` +
+  `INNERTUBE_CONTEXT` from **`unsafeWindow.ytcfg`** (added `@grant unsafeWindow`; falls back to scraping
+  the key/version out of the page HTML) and the user's session cookies. Same-origin `fetch` (no
+  `@connect`). Consistent with the privacy posture — it only *reads* the user's own list, sends nothing new.
+- **Auth = SAPISIDHASH.** Private playlist needs the `Authorization: SAPISIDHASH <ts>_<sha1hex>` header
+  (sha1 of `"<ts> <SAPISID> <origin>"`), computed via `crypto.subtle` from the JS-readable `SAPISID` /
+  `__Secure-3PAPISID` / `__Secure-1PAPISID` cookie. Cookies alone aren't honored by innertube for
+  authed content. If the backfill silently returns 0/your liked count looks wrong, suspect the auth
+  header or a missing cookie first.
+- **Pagination** via continuation tokens. `collectLiked()` **recursively walks** the whole JSON response
+  collecting every `playlistVideoRenderer.videoId` and any `continuationCommand.token` — deliberately
+  NOT fixed-path navigation, because the shape differs between the initial page and continuation pages
+  and drifts across YT revisions. Loop guarded at 1000 pages (~100k videos).
+- **Cadence:** auto-runs once on load (5s delay so ytcfg/cookies are ready), **throttled to once/24h**
+  via `LIKED_TS_KEY`; on failure the timestamp is left untouched so it retries next run. Menu command
+  *"Backfill 'opened' marks from Liked videos now"* forces it. **Reset** zeroes `LIKED_TS_KEY` so the
+  next load re-backfills.
 
 **Stale-tab field-stripping + durable localStorage mirror (v0.12.0):** symptom was a clicked entry
 losing only `c` (`{f,l,t,d}` intact, `c:1`→`c:0`) with no edit, after a wait+reload. Cause: the user

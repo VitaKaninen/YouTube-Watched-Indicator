@@ -1,14 +1,15 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.16.0
-// @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place.
+// @version      0.17.0
+// @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar (gray track, red->green fill) shows the exact watched fraction; hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place. Backfills "already opened" marks from your Liked videos list (videos liked before install), via YouTube's own session API — no API key needed.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addValueChangeListener
 // @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
 // @run-at       document-idle
 // @noframes
 // @updateURL    https://raw.githubusercontent.com/VitaKaninen/YouTube-Watched-Indicator/main/youtube-watched-indicator.user.js
@@ -32,6 +33,13 @@
   const GUTTER_OFFSET  = 24;                 // px left of the metadata row (fallback for list cards, e.g. search)
   const SHORTS_ICON    = 12;                 // px bar height for the inline Shorts badge (sized to the 14px view-count text)
   const SHORTS_GAP     = 5;                  // px gap between the Shorts badge and the view count
+  const BAR_BG         = 'rgba(128,128,128,0.35)';  // gray "track" filling the pill interior; the red->green fill paints over it as the video is watched (theme-neutral semi-transparent gray)
+
+  // Liked-videos backfill: pull your Liked playlist via YouTube's own session API and mark any liked
+  // video NOT already in storage as "clicked" (so videos you watched/liked before install still get the
+  // opened-indicator outline). No Google API key — reuses the page's innertube key + your cookies.
+  const LIKED_TS_KEY     = 'ywi.liked.fetchedAt';   // GM key: ms timestamp of the last successful backfill
+  const LIKED_REFRESH_MS = 24 * 60 * 60 * 1000;     // auto-refresh at most once per 24h (menu command forces it)
 
   // ---------------------------------------------------------------------------
   // Storage  (in-memory map, debounced flush; monotonic max-fraction per video)
@@ -281,6 +289,11 @@
     });
     svg.style.display = 'block';
     const ix = BAR_SW, iy = BAR_SW, iw = BAR_W - 2 * BAR_SW, ih = BAR_H - 2 * BAR_SW, ir = ih / 2;
+    // Gray track filling the whole interior, drawn first so the colored fill below paints over it up to
+    // the watched fraction (leaving gray for the unwatched remainder — the usual progress-bar look).
+    svg.appendChild(svgChild('rect', {
+      x: ix, y: iy, width: iw, height: ih, rx: ir, ry: ir, fill: BAR_BG
+    }));
     if (frac > 0) {
       const id = 'ywi-clip-' + (++clipSeq);
       const defs = svgChild('defs', {});
@@ -508,7 +521,7 @@
     Object.assign(track.style, {
       position: 'relative', height: '10px', borderRadius: '5px', boxSizing: 'border-box',
       border: '1.5px solid var(--yt-spec-text-secondary, #909090)',
-      background: 'rgba(128,128,128,0.18)', cursor: 'pointer', overflow: 'hidden'
+      background: BAR_BG, cursor: 'pointer', overflow: 'hidden'
     });
     const fill = document.createElement('div');
     Object.assign(fill.style, { position: 'absolute', left: '0', top: '0', height: '100%', width: '0%' });
@@ -597,6 +610,112 @@
     window.addEventListener(ev, e => markClicked(idFromClick(e.target)), true));
 
   // ---------------------------------------------------------------------------
+  // Liked-videos backfill  (fill the "I at least opened this" gap for videos liked before install)
+  // Calls YouTube's own internal "innertube" browse API for your Liked playlist (browseId VLLL),
+  // reusing the page's API key + your session cookies (SAPISIDHASH auth, same as the site). No Google
+  // API key and nothing is sent anywhere new — it's a read of your own list, same as opening the page.
+  // Every liked video NOT already in the watched map is created as clicked (c:1, f:0); existing entries
+  // are left untouched, so measured progress / real clicks always win.
+  // ---------------------------------------------------------------------------
+  function getCookie(name) {
+    return (document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)')) || [])[1] || '';
+  }
+  // The web client authenticates innertube with SAPISIDHASH = "<ts>_<sha1hex>", hashing
+  // "<ts> <SAPISID> <origin>". SAPISID (and the __Secure-*PAPISID variants) are JS-readable by design.
+  async function sapisidHash(origin) {
+    const sid = getCookie('SAPISID') || getCookie('__Secure-3PAPISID') || getCookie('__Secure-1PAPISID');
+    if (!sid) return null;
+    const ts = Math.floor(Date.now() / 1000);
+    const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(`${ts} ${sid} ${origin}`));
+    const hex = [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+    return `SAPISIDHASH ${ts}_${hex}`;
+  }
+  // ytcfg holds the innertube API key + request context; it lives on the PAGE window (unsafeWindow under
+  // a userscript sandbox). Fall back to scraping the values out of the page HTML if ytcfg isn't reachable.
+  function pageYtcfg(k) {
+    try { if (typeof unsafeWindow !== 'undefined' && unsafeWindow.ytcfg) return unsafeWindow.ytcfg.get(k); } catch (e) {}
+    return null;
+  }
+  function innertubeKey() {
+    return pageYtcfg('INNERTUBE_API_KEY')
+        || (document.documentElement.innerHTML.match(/"INNERTUBE_API_KEY":"([^"]+)"/) || [])[1]
+        || null;
+  }
+  function innertubeContext() {
+    const ctx = pageYtcfg('INNERTUBE_CONTEXT');
+    if (ctx) return ctx;
+    const ver = pageYtcfg('INNERTUBE_CLIENT_VERSION')
+            || (document.documentElement.innerHTML.match(/"INNERTUBE_CONTEXT_CLIENT_VERSION":"([^"]+)"/) || [])[1]
+            || '2.20240101.00.00';
+    return { client: { clientName: 'WEB', clientVersion: ver, hl: 'en', gl: 'US' } };
+  }
+  async function innertubeBrowse(body) {
+    const key = innertubeKey();
+    if (!key) throw new Error('no innertube key');
+    const headers = { 'Content-Type': 'application/json' };
+    const auth = await sapisidHash(location.origin);
+    if (auth) { headers['Authorization'] = auth; headers['X-Goog-AuthUser'] = '0'; headers['X-Origin'] = location.origin; }
+    const res = await fetch(`/youtubei/v1/browse?key=${encodeURIComponent(key)}&prettyPrint=false`, {
+      method: 'POST', credentials: 'include', headers,
+      body: JSON.stringify({ context: innertubeContext(), ...body })
+    });
+    if (!res.ok) throw new Error('browse HTTP ' + res.status);
+    return res.json();
+  }
+  // Walk the response tree collecting every playlistVideoRenderer videoId and any continuation token,
+  // rather than navigating brittle fixed paths (the response shape shifts between initial + continuation
+  // pages and across YouTube revisions).
+  function collectLiked(obj, ids, tokens) {
+    if (!obj || typeof obj !== 'object') return;
+    if (obj.playlistVideoRenderer && obj.playlistVideoRenderer.videoId) ids.add(obj.playlistVideoRenderer.videoId);
+    const tok = obj.continuationItemRenderer
+      && obj.continuationItemRenderer.continuationEndpoint
+      && obj.continuationItemRenderer.continuationEndpoint.continuationCommand
+      && obj.continuationItemRenderer.continuationEndpoint.continuationCommand.token;
+    if (tok) tokens.push(tok);
+    if (Array.isArray(obj)) { for (const x of obj) collectLiked(x, ids, tokens); }
+    else for (const k in obj) collectLiked(obj[k], ids, tokens);
+  }
+  async function fetchLikedIds() {
+    const ids = new Set();
+    let tokens = [];
+    collectLiked(await innertubeBrowse({ browseId: 'VLLL' }), ids, tokens);   // VL + LL (Liked playlist)
+    let guard = 0;
+    while (tokens.length && guard++ < 1000) {                                  // cap ~100k videos
+      const token = tokens.shift();
+      const next = [];
+      collectLiked(await innertubeBrowse({ continuation: token }), ids, next);
+      tokens = next;
+    }
+    return ids;
+  }
+  function applyLiked(ids) {
+    let changed = false;
+    ids.forEach(id => {
+      if (!watched[id]) { watched[id] = { f: 0, l: 0, t: 0, d: 0, c: 1 }; changed = true; }  // gap-fill only
+    });
+    if (changed) { dirty = true; flush(); scheduleSweep(); }
+    return changed;
+  }
+  let likedBusy = false;
+  async function refreshLiked(force) {
+    if (likedBusy) return;
+    const last = +GM_getValue(LIKED_TS_KEY, 0) || 0;
+    if (!force && Date.now() - last < LIKED_REFRESH_MS) return;                // throttle automatic runs
+    likedBusy = true;
+    try {
+      const ids = await fetchLikedIds();
+      const added = applyLiked(ids);
+      GM_setValue(LIKED_TS_KEY, Date.now());
+      console.log(`[YWI] liked backfill: ${ids.size} liked videos found, ${added ? 'added new gap-fill marks' : 'no new gaps'}`);
+    } catch (e) {
+      console.warn('[YWI] liked backfill failed (will retry next run):', e);   // leave timestamp untouched -> retries
+    } finally {
+      likedBusy = false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Wiring
   // ---------------------------------------------------------------------------
   loadStore();
@@ -605,8 +724,13 @@
   window.addEventListener('yt-navigate-finish', () => { scheduleSweep(); bindVideo(); });
   scheduleSweep();
   bindVideo();
+  // Auto-backfill from Liked videos (throttled to once/24h). Delayed so ytcfg/session cookies are ready.
+  setTimeout(() => refreshLiked(false), 5000);
 
   // Maintenance helpers in the Tampermonkey menu.
+  GM_registerMenuCommand('Backfill "opened" marks from Liked videos now', () => {
+    refreshLiked(true).then(() => console.log('[YWI] liked backfill: done'));
+  });
   GM_registerMenuCommand('Export watched data (JSON to console)', () => {
     // Read straight from storage (and fold into memory) so the dump always reflects what's actually
     // persisted, not just this tab's in-memory copy — the reliable thing to compare across tabs.
@@ -616,7 +740,7 @@
   GM_registerMenuCommand('Reset all watched data', () => {
     if (confirm('Erase all locally-stored watched data for this script?')) {
       // Write empty directly — flush() does a read-merge-write and would fold the old data right back.
-      watched = {}; dirty = false; GM_setValue(STORE_KEY, '{}'); lsSet('{}'); scheduleSweep();
+      watched = {}; dirty = false; GM_setValue(STORE_KEY, '{}'); lsSet('{}'); GM_setValue(LIKED_TS_KEY, 0); scheduleSweep();
     }
   });
 })();
