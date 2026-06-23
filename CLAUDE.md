@@ -145,10 +145,13 @@ existed is gone.
 - **Live streams**: `duration` is `Infinity` — guard against non-finite duration.
 - **Icon placement (three paths; avatar path is now mostly dead — verified live 2026-06-22)**:
   `decorateRow` picks among them in order:
-  1. `placeUnderAvatar` — under the channel avatar (`yt-decorated-avatar-view-model`), centered,
-     `top:100%` + `AVATAR_GAP`px. Avatar position is fixed regardless of title wrap so the icon
-     doesn't drift on a two-line title. **Only taken when the avatar is genuinely rendered** — guarded
-     by `avatar.offsetWidth/Height > 0`. As of 2026-06-22 YouTube **no longer renders a per-video
+  1. `placeUnderAvatar` — under the channel avatar, centered, `top:100%` + `AVATAR_GAP`px. Avatar
+     position is fixed regardless of title wrap so the icon doesn't drift on a two-line title. Matches
+     **both** avatar elements: single-author cards use `yt-decorated-avatar-view-model`; **multi-author**
+     cards (e.g. "More Court TV and COURT TV") use a `yt-avatar-stack-view-model` (~32px, same box) —
+     unrecognized (pre-v0.16.0) it fell through to `placeBesideMeta` and the badge landed inline on the
+     author line, pushed down/right vs. the under-avatar pill on single-author cards. **Only taken when
+     the avatar is genuinely rendered** — guarded by `avatar.offsetWidth/Height > 0`. As of 2026-06-22 YouTube **no longer renders a per-video
      avatar** on channel-grid cards (it's absent) and **collapses it to 0×0** in watch-sidebar
      recommendation lockups, so this path rarely fires now; the guard is what stops the old code from
      anchoring an absolutely-positioned badge to a zero-size box (→ badge off in the gutter / at 0,0,

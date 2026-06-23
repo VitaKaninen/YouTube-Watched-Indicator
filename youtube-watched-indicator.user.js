@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.15.0
+// @version      0.16.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -329,7 +329,11 @@
   // keeps the icon's vertical position fixed no matter how many lines the title wraps to.
   function avatarOf(card) {
     if (card.matches('yt-lockup-view-model, ytd-rich-item-renderer, ytd-rich-grid-media')) {
-      return card.querySelector('yt-decorated-avatar-view-model, yt-img-shadow#avatar, #avatar');
+      // Single-author cards use yt-decorated-avatar-view-model; MULTI-author cards (e.g. "More Court TV
+      // and COURT TV") use a yt-avatar-stack-view-model instead — same ~32px box, but unrecognized it
+      // fell through to placeBesideMeta and the badge landed inline on the author line (pushed down/right
+      // vs. the under-avatar pill on single-author cards). Match both so the stack gets placeUnderAvatar.
+      return card.querySelector('yt-decorated-avatar-view-model, yt-avatar-stack-view-model, yt-img-shadow#avatar, #avatar');
     }
     return null;  // list-style cards (e.g. search results) -> fall back to the metadata-row gutter
   }
