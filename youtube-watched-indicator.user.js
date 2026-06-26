@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.21.0
+// @version      0.22.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place. Videos in your Liked list that you haven't otherwise touched get a gray-filled pill (backfilled via YouTube's own session API — no API key needed), so you can spot ones you liked before installing.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -769,25 +769,30 @@
   GM_registerMenuCommand('Mark Liked videos (gray pill) now', () => {
     refreshLiked(true).then(() => console.log('[YWI] liked backfill: done'));
   });
-  // TEMP DIAGNOSTIC (added v0.20.0 to debug "gray pills don't show") — remove once the liked backfill is
-  // confirmed working. Logs exactly what the innertube Liked-playlist call returns so we can see whether
-  // the key/auth are found, the HTTP status, and which item renderers come back.
+  // TEMP DIAGNOSTIC (added v0.20.0 to debug the liked backfill) — remove once confirmed working. Pages
+  // through the whole Liked playlist with per-page logging so we can see where the continuation chain
+  // breaks, then dumps the final response (the one with no next token) to reveal where YT nests it.
   GM_registerMenuCommand('YWI: diagnose Liked fetch (console)', async () => {
     try {
-      console.log('[YWI diag] innertube key:', innertubeKey() ? 'FOUND' : 'MISSING',
-                  '| ytcfg via unsafeWindow:', (typeof unsafeWindow !== 'undefined' && unsafeWindow.ytcfg) ? 'yes' : 'no');
-      console.log('[YWI diag] SAPISID auth header:', (await sapisidHash(location.origin)) ? 'BUILT' : 'MISSING (no SAPISID cookie)');
-      const data = await innertubeBrowse({ browseId: 'VLLL' });
-      const ids = new Set(), tokens = [];
+      console.log('[YWI diag] key:', innertubeKey() ? 'FOUND' : 'MISSING',
+                  '| auth:', (await sapisidHash(location.origin)) ? 'BUILT' : 'MISSING');
+      let data = await innertubeBrowse({ browseId: 'VLLL' });
+      const ids = new Set(); let tokens = [];
       collectLiked(data, ids, tokens);
-      const kinds = {};
-      (function scan(o) {
-        if (!o || typeof o !== 'object') return;
-        for (const k in o) { if (/(Renderer|ViewModel)$/.test(k)) kinds[k] = (kinds[k] || 0) + 1; scan(o[k]); }
-      })(data);
-      console.log('[YWI diag] first page -> video ids parsed:', ids.size, '| continuation tokens:', tokens.length);
-      console.log('[YWI diag] item renderer/view-model kinds in first page:', kinds);
-      console.log('[YWI diag] full first-page response object follows (expand to inspect):', data);
+      console.log(`[YWI diag] page 1: total ids ${ids.size}, next token: ${tokens.length ? 'YES' : 'NO'}`);
+      let guard = 0, page = 1;
+      while (tokens.length && guard++ < 1000) {
+        data = await innertubeBrowse({ continuation: tokens.shift() });
+        const next = [];
+        collectLiked(data, ids, next);
+        page++;
+        console.log(`[YWI diag] page ${page}: total ids ${ids.size}, next token: ${next.length ? 'YES' : 'NO'}`);
+        tokens = next;
+      }
+      console.log('[YWI diag] DONE — total liked ids:', ids.size, '| pages:', page);
+      console.log('[YWI diag] last response top-level keys:', data && Object.keys(data));
+      console.log('[YWI diag] last response onResponseReceivedActions:', data && data.onResponseReceivedActions);
+      console.log('[YWI diag] last response full object (expand to find the missing token):', data);
     } catch (e) {
       console.error('[YWI diag] FETCH ERROR:', e);
     }
