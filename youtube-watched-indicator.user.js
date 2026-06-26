@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.24.0
+// @version      0.25.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place. Videos in your Liked list that you haven't otherwise touched get a gray-filled pill (backfilled via YouTube's own session API — no API key needed), so you can spot ones you liked before installing.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -41,7 +41,7 @@
   const LIKED_TS_KEY     = 'ywi.liked.fetchedAt';   // GM key: ms timestamp of the last successful backfill
   const LIKED_REFRESH_MS = 24 * 60 * 60 * 1000;     // auto-refresh at most once per 24h (menu command forces it)
   const LIKED_VER_KEY    = 'ywi.liked.logicVer';    // GM key: which backfill-logic version last ran
-  const LIKED_VER        = 4;                        // bump when the backfill logic changes -> forces a one-time re-run (v2 = liked stored as `k`, heals the v0.17-0.18 `c` mislabel; v3 = parser also reads the new lockupViewModel item shape; v4 = robust continuation-token search so pagination gets past the first 100)
+  const LIKED_VER        = 5;                        // bump when the backfill logic changes -> forces a one-time re-run (v2 = liked stored as `k`, heals the v0.17-0.18 `c` mislabel; v3 = parser also reads the new lockupViewModel item shape; v4 = robust continuation-token search; v5 = continuationItemViewModel replaces continuationItemRenderer)
 
   // ---------------------------------------------------------------------------
   // Storage  (in-memory map, debounced flush; monotonic max-fraction per video)
@@ -696,8 +696,9 @@
         && (!obj.lockupViewModel.contentType || obj.lockupViewModel.contentType === 'LOCKUP_CONTENT_TYPE_VIDEO')) {
       ids.add(obj.lockupViewModel.contentId);
     }
-    if (obj.continuationItemRenderer) {
-      const tok = deepToken(obj.continuationItemRenderer);   // path drifts across YT revisions — search for it
+    if (obj.continuationItemRenderer || obj.continuationItemViewModel) {
+      // YouTube renamed continuationItemRenderer → continuationItemViewModel; handle both
+      const tok = deepToken(obj.continuationItemRenderer || obj.continuationItemViewModel);
       if (tok) tokens.push(tok);
     }
     if (Array.isArray(obj)) { for (const x of obj) collectLiked(x, ids, tokens); }
