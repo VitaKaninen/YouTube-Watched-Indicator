@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.22.0
+// @version      0.24.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place. Videos in your Liked list that you haven't otherwise touched get a gray-filled pill (backfilled via YouTube's own session API — no API key needed), so you can spot ones you liked before installing.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -635,7 +635,7 @@
   // The web client authenticates innertube with SAPISIDHASH = "<ts>_<sha1hex>", hashing
   // "<ts> <SAPISID> <origin>". SAPISID (and the __Secure-*PAPISID variants) are JS-readable by design.
   async function sapisidHash(origin) {
-    const sid = getCookie('SAPISID') || getCookie('__Secure-3PAPISID') || getCookie('__Secure-1PAPISID');
+    const sid = getCookie('__Secure-3PAPISID') || getCookie('__Secure-1PAPISID') || getCookie('SAPISID');
     if (!sid) return null;
     const ts = Math.floor(Date.now() / 1000);
     const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(`${ts} ${sid} ${origin}`));
@@ -779,6 +779,18 @@
       let data = await innertubeBrowse({ browseId: 'VLLL' });
       const ids = new Set(); let tokens = [];
       collectLiked(data, ids, tokens);
+      // Log any page-1 alerts immediately — an alert here often explains a capped/no-token response.
+      const p1alerts = [];
+      (function find(o) {
+        if (!o || typeof o !== 'object') return;
+        if (o.alertRenderer || o.alertWithButtonRenderer) {
+          const a = o.alertRenderer || o.alertWithButtonRenderer;
+          const txt = a.text && (a.text.simpleText || (a.text.runs && a.text.runs.map(r => r.text).join('')));
+          p1alerts.push({ type: a.type, text: txt });
+        }
+        for (const k in o) find(o[k]);
+      })(data);
+      if (p1alerts.length) console.warn('[YWI diag] page 1 ALERTS (may explain missing token):', p1alerts);
       console.log(`[YWI diag] page 1: total ids ${ids.size}, next token: ${tokens.length ? 'YES' : 'NO'}`);
       let guard = 0, page = 1;
       while (tokens.length && guard++ < 1000) {
@@ -790,9 +802,30 @@
         tokens = next;
       }
       console.log('[YWI diag] DONE — total liked ids:', ids.size, '| pages:', page);
-      console.log('[YWI diag] last response top-level keys:', data && Object.keys(data));
-      console.log('[YWI diag] last response onResponseReceivedActions:', data && data.onResponseReceivedActions);
-      console.log('[YWI diag] last response full object (expand to find the missing token):', data);
+      // Surface any alert/error YouTube attached (throttle / "unavailable" messages explain a short response).
+      const alerts = [];
+      (function find(o) {
+        if (!o || typeof o !== 'object') return;
+        if (o.alertRenderer || o.alertWithButtonRenderer) {
+          const a = o.alertRenderer || o.alertWithButtonRenderer;
+          const txt = a.text && (a.text.simpleText || (a.text.runs && a.text.runs.map(r => r.text).join('')));
+          alerts.push({ type: a.type, text: txt });
+        }
+        for (const k in o) find(o[k]);
+      })(data);
+      console.log('[YWI diag] alerts in last response:', alerts.length ? alerts : 'none');
+      // Brute-force: every key containing "continuation" anywhere, with its path — reveals a token shape
+      // deepToken might miss (e.g. nextContinuationData) vs. the response simply having no continuation.
+      const conts = [];
+      (function find(o, path) {
+        if (!o || typeof o !== 'object') return;
+        for (const k in o) {
+          if (/continuation/i.test(k)) conts.push({ path: (path + '.' + k).slice(1), value: o[k] });
+          find(o[k], path + '.' + k);
+        }
+      })(data, '');
+      console.log('[YWI diag] continuation-ish nodes in last response:', conts.length ? conts : 'NONE');
+      console.log('[YWI diag] last response full object:', data);
     } catch (e) {
       console.error('[YWI diag] FETCH ERROR:', e);
     }
