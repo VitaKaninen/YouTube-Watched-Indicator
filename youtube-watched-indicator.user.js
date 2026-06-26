@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.25.0
+// @version      0.26.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place. Videos in your Liked list that you haven't otherwise touched get a gray-filled pill (backfilled via YouTube's own session API — no API key needed), so you can spot ones you liked before installing.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -41,7 +41,7 @@
   const LIKED_TS_KEY     = 'ywi.liked.fetchedAt';   // GM key: ms timestamp of the last successful backfill
   const LIKED_REFRESH_MS = 24 * 60 * 60 * 1000;     // auto-refresh at most once per 24h (menu command forces it)
   const LIKED_VER_KEY    = 'ywi.liked.logicVer';    // GM key: which backfill-logic version last ran
-  const LIKED_VER        = 5;                        // bump when the backfill logic changes -> forces a one-time re-run (v2 = liked stored as `k`, heals the v0.17-0.18 `c` mislabel; v3 = parser also reads the new lockupViewModel item shape; v4 = robust continuation-token search; v5 = continuationItemViewModel replaces continuationItemRenderer)
+  const LIKED_VER        = 6;                        // bump when the backfill logic changes -> forces a one-time re-run (v2 = liked stored as `k`, heals the v0.17-0.18 `c` mislabel; v3 = parser also reads the new lockupViewModel item shape; v4 = robust continuation-token search; v5 = continuationItemViewModel replaces continuationItemRenderer; v6 = also collect SHORTS lockupViewModels)
 
   // ---------------------------------------------------------------------------
   // Storage  (in-memory map, debounced flush; monotonic max-fraction per video)
@@ -692,8 +692,8 @@
   function collectLiked(obj, ids, tokens) {
     if (!obj || typeof obj !== 'object') return;
     if (obj.playlistVideoRenderer && isVid(obj.playlistVideoRenderer.videoId)) ids.add(obj.playlistVideoRenderer.videoId);
-    if (obj.lockupViewModel && isVid(obj.lockupViewModel.contentId)
-        && (!obj.lockupViewModel.contentType || obj.lockupViewModel.contentType === 'LOCKUP_CONTENT_TYPE_VIDEO')) {
+    // Accept VIDEO and SHORTS lockups (and any future type with a valid 11-char video ID).
+    if (obj.lockupViewModel && isVid(obj.lockupViewModel.contentId)) {
       ids.add(obj.lockupViewModel.contentId);
     }
     if (obj.continuationItemRenderer || obj.continuationItemViewModel) {
@@ -829,6 +829,21 @@
       console.log('[YWI diag] last response full object:', data);
     } catch (e) {
       console.error('[YWI diag] FETCH ERROR:', e);
+    }
+  });
+  // Shows liked video IDs that are not yet in the watched map — lets you inspect them via URL
+  // without navigating from a listing (direct URL navigation doesn't fire markClicked).
+  GM_registerMenuCommand('YWI: show liked IDs missing from watched map (console)', async () => {
+    try {
+      console.log('[YWI diag] fetching liked IDs...');
+      const ids = await fetchLikedIds();
+      mergeInto(parseStore(GM_getValue(STORE_KEY, '{}')));
+      const missing = [...ids].filter(id => !watched[id]);
+      const likedOnly = [...ids].filter(id => watched[id] && watched[id].k && !watched[id].c && !(watched[id].f > 0));
+      console.log(`[YWI diag] liked total: ${ids.size} | missing from map: ${missing.length} | gray-pill (k only): ${likedOnly.length}`);
+      if (missing.length) console.log('[YWI diag] missing IDs (open via youtube.com/watch?v=ID to inspect):', missing);
+    } catch (e) {
+      console.error('[YWI diag] ERROR:', e);
     }
   });
   GM_registerMenuCommand('Export watched data (JSON to console)', () => {
