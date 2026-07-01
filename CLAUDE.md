@@ -252,3 +252,15 @@ then reload the page. Must be done in the *same profile* the script lives in.
 - **Shorts decoration (v0.2.0)**: implemented and **verified live** on the subscriptions Shorts shelf
   — all three states render in the thumbnail top-left and are legible; dedup confirmed. Capture for
   Shorts now rides the normal `/watch` path (the user's redirect script), which is the reliable route.
+- **Watch-page playlist panel (fourth DOM regime; v0.27.0)** — verified live 2026-07-01: when the
+  current video is part of a playlist, the right-hand "Up next" sidebar becomes an
+  `ytd-playlist-panel-renderer` full of `ytd-playlist-panel-video-renderer` items. Distinct from all
+  three regimes above — no `#metadata-line`, no `yt-content-metadata-view-model`, no avatar — so
+  `sweep()` never queried it and these cards were silently skipped entirely (no error, no console
+  warning — the bug only shows up because the panel only exists for playlist videos). Fix:
+  `decoratePlaylistPanelItem()` targets `#byline-container` (already `display:flex; align-items:center`)
+  and prepends the badge the same way `placeBesideMeta` does. Video ID resolves fine via the existing
+  `a[href*="/watch?v="]` fallback in `idFromCard` (the row's link is `a#wc-endpoint`, not `#thumbnail`/
+  `#video-title-link`) — no change needed there. Click-tracking also already worked here for the same
+  reason: `idFromClick`'s `a[href]` fallback catches `#wc-endpoint` without needing this card type added
+  to its `.closest(...)` list.

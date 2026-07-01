@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.26.0
+// @version      0.27.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place. Videos in your Liked list that you haven't otherwise touched get a gray-filled pill (backfilled via YouTube's own session API — no API key needed), so you can spot ones you liked before installing.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -489,6 +489,26 @@
     applyBadgeState(badge, id, SHORTS_ICON);
   }
 
+  // Watch-page "Up next" playlist panel regime: ytd-playlist-panel-video-renderer. Distinct from all
+  // three regimes above — no #metadata-line, no yt-content-metadata-view-model, no avatar — so sweep()
+  // must query it separately or these cards are silently skipped (the bug: the panel only shows up
+  // when the current video is part of a playlist, so it went unnoticed until then). #byline-container
+  // is already a flex row (display:flex, align-items:center), so prepend inline like placeBesideMeta.
+  function decoratePlaylistPanelItem(card) {
+    const id = idFromCard(card);
+    if (!id) return;
+    const byline = card.querySelector('#byline-container');
+    if (!byline) return;
+    let badge = card.querySelector('.ywi-badge');
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'ywi-badge';
+      placeBesideMeta(byline, badge);
+      badge.style.color = getComputedStyle(byline.querySelector('#byline') || byline).color;
+    }
+    applyBadgeState(badge, id);
+  }
+
   function sweep() {
     // Legacy regime: the views/time row is #metadata-line.
     document.querySelectorAll('#metadata-line').forEach(decorateRow);
@@ -496,6 +516,8 @@
     document.querySelectorAll('yt-content-metadata-view-model').forEach(decorateRow);
     // Shorts regime: distinct DOM, badge overlaid on the thumbnail.
     document.querySelectorAll('ytm-shorts-lockup-view-model-v2, ytm-shorts-lockup-view-model').forEach(decorateShort);
+    // Watch-page playlist panel regime: distinct DOM, badge inline beside the channel name.
+    document.querySelectorAll('ytd-playlist-panel-video-renderer').forEach(decoratePlaylistPanelItem);
     updateWatchBar();
   }
 
