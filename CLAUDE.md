@@ -1,266 +1,113 @@
 # YouTube Watched Indicator
 
-Tampermonkey userscript that puts a watched-state icon on YouTube video thumbnails. As of **v0.6.0**
-the icon is a **pill-shaped progress bar** (same `currentColor` rounded outline as the old ring, just
-elongated) whose **fill width = the exact stored watched fraction** and whose **fill color sweeps
-red → yellow → green** as it fills (linear HSL hue interp 0°→120°, `barColor()`). It replaced the old
-three-state empty ○ / half-filled red ◐ / full green ● circle. The `T_PARTIAL`/`T_FULL` thresholds and
-`stateFor()` survive only as a coarse gate for the live re-sweep during capture (see below) — they no
-longer drive what's drawn; the bar always renders the precise fraction.
+Tampermonkey userscript: a pill-shaped progress badge on every YouTube video card, driven by watch
+progress the script measures itself. Main file: [`youtube-watched-indicator.user.js`](youtube-watched-indicator.user.js).
 
-Main file: [`youtube-watched-indicator.user.js`](youtube-watched-indicator.user.js)
+## Why it measures watching itself
+The user keeps YouTube watch history OFF permanently, so YouTube stores nothing (no resume bars on
+thumbnails). The script samples the HTML5 player on `/watch` and `/shorts/` and stores results
+locally. Accepted: no record of pre-install viewing, this browser only, nothing sent to Google.
 
-## Core design decision — why we measure watched-ness ourselves
+## Badge rendering (`buildIcon`, `applyBadgeState`)
+- Fill width = `f` exactly; color `barColor()` = HSL hue 0→120 (red→green). `T_PARTIAL`/`T_FULL`/
+  `stateFor()` only gate the live re-sweep during capture.
+- Outline opacity `OUTLINE_CLICKED` once `c` or `f>0`, else `OUTLINE_UNCLICKED` — opacity, not a
+  gray, so it follows the theme. Purpose: the user opens many watch-later tabs and forgets which.
+- Gray fill (`BAR_BG`) ⟺ `likedOnly` = `k && !c && !(f>0)`. Clicked or watched → normal rules even
+  when liked (user decision, reaffirmed 2026-10-02). Rejected: gray behind every pill (too much
+  gray); gray on clicked/watched videos.
+- Tooltip `57% / 4:40` (`f*d`); `NN% watched` without `d`; `In your Liked playlist` when likedOnly.
+  The badge needs `pointer-events:auto`, or the hover reaches the thumbnail (starts the preview, no tooltip).
 
-The user keeps **YouTube watch history OFF and will not turn it on**. With history off, YouTube
-stores *nothing* about what you've watched — no server record, and critically **no resume-playback
-progress bar on thumbnails**. So the obvious approach (read YouTube's own progress bar) is impossible.
+## Data model — `{ videoId: { f, l, t, d, c, k } }` under `STORE_KEY`
+- `f` furthest fraction, monotonic. `l` last playhead fraction (seek-back lowers it). `t` ms of the
+  last `l` write. `d` duration s (0 until known). `c` clicked from a listing. `k` in Liked playlist.
+- `mergeInto`: max `f`, fill `d`, newest-`t` wins `l`, OR `c`/`k` (both sticky). `normEntry`
+  upgrades legacy bare-number entries.
+- `c` and `k` are distinct. v0.17–0.18 stored liked as `c:1`; `applyLiked`'s heal relabels a bare
+  `c:1` (no f/l/d) on a liked video to `k:1` **only when the previous `LIKED_VER_KEY` < 2**. Run on
+  every backfill (bug until v0.28.0) it erased real clicks on videos liked after the last backfill.
 
-Instead the script **measures watched-% itself** from the HTML5 player on `/watch` (and `/shorts/`)
-and stores it locally in Tampermonkey. Consequences, all accepted by the user:
-- **No backfill** — starts empty, accumulates only from install forward.
-- **This-browser-only** — data lives in this profile's GM storage; no cross-device sync.
-- **Fully local** — nothing sent to Google; consistent with the user's history-off stance.
+## Storage and cross-tab
+- GM storage plus a mirror in the page's `localStorage` (same key). The mirror belongs to the
+  origin, so it survives a userscript-manager reset, and old script versions (no mirror code) can't
+  strip it. `loadStore` merges it back and re-seeds GM.
+- An old-version tab rewrites the single GM blob in its own format and drops fields it doesn't
+  know; this recurs whenever a field is added. The mirror is the fix (protects values written by ≥ v0.12.0).
+- `flush()` is read-merge-write over both backends, so a stale tab can't clobber others. Reset must
+  write `{}` directly — `flush()` would merge the old data back. Export re-reads storage first.
+- Cross-tab: `GM_addValueChangeListener` plus the `window` `storage` event (GM's listener is
+  unreliable on Firefox/LibreWolf).
+- Flush is a **throttle** (`if (flushTimer) return`), never a debounce: `timeupdate` at ~4 Hz
+  starves a debounce, and nothing persists during playback.
+- `visibilitychange` must be on `document` (Firefox/LibreWolf don't fire it on `window`).
 
-Data model (**v0.10.0**, plus `k` in **v0.19.0**): `{ videoId: { f, l, t, d, c, k } }`:
-- `f` — **furthest** fraction (0..1), monotonic high-water mark (only ever increases). Drives the
-  thumbnail bar fill and the watch-page green fill.
-- `l` — **last** fraction (0..1), the most recent playhead position; **not** monotonic (a seek-back
-  lowers it). Drives the watch-page white marker and the resume click.
-- `t` — ms timestamp of the last `l` update. Used only to resolve `l` across tabs (see `mergeInto`):
-  since `l` has no max to fall back on, the newest write wins.
-- `d` — durationSeconds, constant per video, captured from the player, filled in whenever it first
-  becomes known (0 until then). Needed for the mm:ss timestamps.
-- `c` — **clicked/opened** flag (1 once you've opened the video from a listing, even if never watched);
-  sticky, OR-merged across copies. Dims the empty bar's outline until set (see below).
-- `k` — **liked** flag (**v0.19.0**; 1 if in the user's Liked playlist, set by the liked-backfill for
-  videos not otherwise in storage); sticky, OR-merged. Renders a **gray-filled pill** (`BAR_BG`) — but
-  ONLY while the video is neither clicked nor watched (`likedOnly` in `applyBadgeState` = `k && !c &&
-  !(f>0)`); once clicked/watched the normal rules take over. It's the "you liked this before install"
-  indicator and is **distinct** from `c` — an earlier attempt (v0.17-0.18) wrongly stored liked as `c`,
-  which `applyLiked` now heals (see the liked-backfill section).
+## Capture (`bindVideo`)
+- Event-driven on the player `<video>`: `timeupdate`, `seeking`/`seeked` (fire while paused),
+  `pause`, `ended` → 1. `seeked`/`pause`/`ended` flush at once. The 2 s interval only rebinds/resamples.
+- Also flush on `pagehide`, `beforeunload`, hidden, and `yt-navigate-start` (SPA nav fires none of the others).
+- `activeId` comes only from the video's `loadedmetadata`/`durationchange` and is cleared on
+  `emptied` — never from the URL — so a late tick from the previous video can't be filed under the new id.
+- Player = `#movie_player, #shorts-player`; on native `/shorts/` fall back to the playing `<video>`
+  (gated to `/shorts/` so hover previews are never sampled). The user's redirect script sends most
+  Shorts to `/watch`. Skip while `ad-showing`; skip non-finite duration (live).
 
-**Legacy compat:** older entries were a bare number (just the fraction); `normEntry()` upgrades any
-`number` to `{ f, l: f, t: 0, d: 0, c: 0, k: 0 }` on read, so old data keeps working — `l` defaults to `f` and
-the timestamp won't show until `d` is recaptured. All storage helpers (`fracOf`/`lastOf`/`durOf`/`mergeInto`/
-`record`) operate on the object shape; the in-memory map is normalized to objects in `parseStore()`.
+## Click tracking (`markClicked`)
+`click`/`auxclick`/`contextmenu` on **`window` capture** (runs before page and other-script handlers
+on `document`), and **flush immediately** (the page often navigates or opens a tab before a throttled
+flush fires). Works even when the opened tab is deferred and never runs the script.
 
-Two features ride on `d`:
-- **Hover timestamp** — the thumbnail bar's `title` shows `57% / 4:40` (percentage + the position you'd
-  reached = `f * d`), via `fmtTime()`. Falls back to `NN% watched` when `d` is unknown. **Gotcha:** the
-  badge must be `pointer-events: auto` for the native `title` tooltip to appear — with `none` (the
-  original value) the hover passes through to the thumbnail, which starts the video preview and the
-  tooltip never shows. Shorts already worked because `placeBesideViews` never set `none`; the grid
-  (`placeUnderAvatar`) and list (`placeInGutter`) placements did and were flipped to `auto`.
-- **Watch-page resume bar (`/watch` only)** — `updateWatchBar()` injects a clickable `<div>` bar under
-  the title (anchored in `ytd-watch-metadata #above-the-fold`, before `#bottom-row`; capped at
-  `WATCHBAR_MAXW`=360px — full column width was "too wide"). Wrap `margin-top` is 0 (v0.14.0 closed the
-  10px gap above the bar; v0.13.0's move above the title was reverted). Green fill = **furthest** position (`f`);
-  white marker = **last** position (`l`, ≤ `f`). **It is deliberately NOT a scrub bar:** clicking
-  *anywhere* jumps to the LAST position (`video.currentTime = lastOf(id) * d`), never to the click point
-  — clicking elsewhere must not move (and thus overwrite, via `record()`) your saved spot. Seeks **in
-  place, no reload** (the point of it vs. a `?t=` URL). Built from divs (not SVG) so it stretches with
-  rounded ends. Wired from `sweep()` + the `SAMPLE_MS` interval; removes itself when off `/watch`.
+## Liked backfill (`refreshLiked`)
+- Innertube `POST /youtubei/v1/browse`, `browseId:'VLLL'`; key + context from `unsafeWindow.ytcfg`
+  (HTML-scrape fallback); auth header `SAPISIDHASH` from `__Secure-3PAPISID` / `__Secure-1PAPISID` /
+  `SAPISID` — cookies alone aren't honored. No API key, no `@connect`.
+- `collectLiked` walks the whole JSON (shapes drift): `playlistVideoRenderer.videoId`,
+  `lockupViewModel.contentId`, tokens from `continuationItemRenderer`/`continuationItemViewModel` via `deepToken`.
+- Runs 5 s after load when 24 h stale (`LIKED_TS_KEY`) or `LIKED_VER` changed; the menu command
+  forces it; on failure both keys stay so it retries. Reset zeroes both.
+- **No live Like detection** — a new like is unknown until the next backfill.
+- Observed 2026-10-02: the fetch stops at 4,988 IDs / 50 pages, all `VIDEO` lockups; storage held
+  ~2,100 `k` entries not in that list (unliked, or past a ~5,000 cap — unverified). `k` is never cleared.
 
-**Click tracking (`c`):** a capture-phase `click`/`auxclick`/`contextmenu` listener (`markClicked` /
-`idFromClick`) marks a video opened the instant you click its card on a listing — covering left-click,
-middle-click, and right-click→open-in-new-tab. Captured **on the listing page**, so it works even though
-the user's setup opens videos in deferred/lazy-loaded tabs that never run the script (the whole point —
-the new tab needn't load for the mark to stick). The empty bar's outline is dim (`OUTLINE_UNCLICKED`
-opacity) until clicked, then brighter (`OUTLINE_CLICKED`); a watched video (`f>0`) counts as clicked
-regardless. Opacity (not a hardcoded gray) so it adapts to theme. Purpose: the user opens many "watch
-later" tabs and forgets which they've already opened.
+## Watch-page resume bar (`updateWatchBar`, `/watch` only)
+Div bar in `ytd-watch-metadata #above-the-fold` before `#bottom-row`, max `WATCHBAR_MAXW` 360 px
+(full width was too wide; placing it above the title was tried and reverted). Fill = `f`, white
+marker = `l`. **Not a scrub bar:** a click anywhere seeks in place to `l`; clicking elsewhere must
+never move (and via `record()` overwrite) the saved spot.
+Known from code, not measured: after a reload the video starts at 0:00, and pressing Play before
+clicking the bar overwrites `l` on the first tick; the click then does nothing (`l > 0` guard).
 
-**Click-persistence gotchas (v0.11.0 fix — clicked outlines vanished on reload):**
-- **Flush IMMEDIATELY on click, not via `scheduleFlush`** — unlike playback (continuous, throttled), a
-  click is a one-shot event and the page often navigates / reloads / spawns a new tab right after, so a
-  1.5s deferred flush gets lost in that window before it persists. `markClicked` calls `flush()` directly.
-- **Listen on `window` capture, not `document`** — capture order is window → document → target, so a
-  window-capture handler fires before any page/extension handler on `document` (e.g. the user's
-  "open in new tab" script) that might `stopImmediatePropagation` and prevent us from seeing the click.
-- Within one script version storage never regresses `c` (read-merge-write OR-merges it; only Reset
-  writes `{}`). The real-world regression we hit (v0.12.0) came from **a stale OLD-version tab** — see
-  the durable-mirror gotcha below.
+## DOM regimes (`sweep`) and placement
+| Regime | Card | Badge placement |
+|---|---|---|
+| View-model (subscriptions, channel grid, `/playlist`, watch sidebar) | `yt-lockup-view-model` + `yt-content-metadata-view-model` | under the avatar when it has a real box (`placeUnderAvatar`; `yt-decorated-avatar-view-model` or multi-author `yt-avatar-stack-view-model`), else inline at the start of the first metadata row (`placeBesideMeta`) |
+| Legacy (search) | `ytd-video-renderer` `#metadata-line` | `placeInGutter`, left of the row |
+| Shorts | `ytm-shorts-lockup-view-model-v2` wrapping `ytm-shorts-lockup-view-model` (normalize to outer, dedupe) | inline left of the view-count subhead (`placeBesideViews`, user preference), `SHORTS_ICON` |
+| Playlist panel (watch page with `list=`) | `ytd-playlist-panel-video-renderer` | prepended in `#byline-container` |
 
-**Liked-videos backfill (v0.17.0; redesigned v0.19.0):** to flag videos liked *before* install, the
-script pulls the user's **Liked playlist** and marks any liked video **not already in the watched map**
-with the `k` (liked) flag (`{f:0,l:0,t:0,d:0,c:0,k:1}`) → renders as a **gray-filled pill**. Existing
-entries (clicked/watched) are **left untouched** — measured progress and real clicks always win
-(intentional per the user: "if it's neither clicked nor watched but IS liked, show gray; otherwise
-normal rules"). The gray is *only* for liked-but-untouched videos; it is **not** a general progress-bar
-track (an earlier try put gray behind every pill — rejected — see below).
-- **Migration heal (v0.19.0):** v0.17-0.18 wrongly stored liked videos as **clicked** (`c:1`), which is
-  indistinguishable in storage from a real click. `applyLiked` heals it: a *bare* click (`c:1`, no `f`/
-  `l`/`d`) on a confirmed-liked video is relabeled to `k:1, c:0`. Watched videos and clicks carrying real
-  data are untouched. A genuine pre-fix click on a liked video flips to gray too (can't be told apart) —
-  rare, cosmetic. The heal auto-runs once on upgrade via `LIKED_VER_KEY`/`LIKED_VER` (bump `LIKED_VER`
-  when `applyLiked`'s logic changes to force a one-time re-run, independent of the 24h throttle).
-- **Rejected approaches (this is why the design is what it is — don't re-try them):** (1) gray as a track
-  behind *every* pill (v0.17) — user: too many videos got gray; (2) gray only on clicked/watched (v0.18)
-  — user wanted gray *specifically* and *only* for liked-not-otherwise-touched videos. Final: gray ⟺
-  `likedOnly`.
-- **No Google API key.** It calls YouTube's own internal **innertube** browse API (`POST
-  /youtubei/v1/browse`, `browseId:'VLLL'` = `VL`+`LL`), reusing the page's `INNERTUBE_API_KEY` +
-  `INNERTUBE_CONTEXT` from **`unsafeWindow.ytcfg`** (added `@grant unsafeWindow`; falls back to scraping
-  the key/version out of the page HTML) and the user's session cookies. Same-origin `fetch` (no
-  `@connect`). Consistent with the privacy posture — it only *reads* the user's own list, sends nothing new.
-- **Auth = SAPISIDHASH.** Private playlist needs the `Authorization: SAPISIDHASH <ts>_<sha1hex>` header
-  (sha1 of `"<ts> <SAPISID> <origin>"`), computed via `crypto.subtle` from the JS-readable `SAPISID` /
-  `__Secure-3PAPISID` / `__Secure-1PAPISID` cookie. Cookies alone aren't honored by innertube for
-  authed content. If the backfill silently returns 0/your liked count looks wrong, suspect the auth
-  header or a missing cookie first.
-- **Pagination** via continuation tokens. `collectLiked()` **recursively walks** the whole JSON response
-  collecting every `playlistVideoRenderer.videoId` and any `continuationCommand.token` — deliberately
-  NOT fixed-path navigation, because the shape differs between the initial page and continuation pages
-  and drifts across YT revisions. Loop guarded at 1000 pages (~100k videos).
-- **Cadence:** auto-runs once on load (5s delay so ytcfg/cookies are ready), **throttled to once/24h**
-  via `LIKED_TS_KEY` (overridden by a `LIKED_VER` bump, which forces one re-run regardless); on failure
-  both keys are left untouched so it retries next run. Menu command *"Mark Liked videos (gray pill) now"*
-  forces it. **Reset** zeroes `LIKED_TS_KEY` *and* `LIKED_VER_KEY` so the next load re-backfills.
+- Only the subscriptions grid renders the avatar; channel grid, `/playlist` and the watch sidebar
+  omit it or collapse it to 0×0. Keep the `offsetWidth/Height > 0` guard: anchoring to a 0×0 avatar
+  puts the badge off-screen. Under-avatar badges on one-line-title cards hang into the row gap (fine).
+- Set `badge.style.color` from the card's metadata text: inside the avatar `currentColor` is black
+  (invisible on dark). `--yt-spec-text-secondary` reads empty at `:root`.
+- Non-video `yt-content-metadata-view-model` rows (channel header) are skipped by requiring a
+  resolvable `/watch` or `/shorts/` id.
+- Trusted Types: build all DOM with `createElement`/`createElementNS`, never `innerHTML`.
+- Selectors drift; re-inspect live rather than from memory.
 
-**Stale-tab field-stripping + durable localStorage mirror (v0.12.0):** symptom was a clicked entry
-losing only `c` (`{f,l,t,d}` intact, `c:1`→`c:0`) with no edit, after a wait+reload. Cause: the user
-keeps many tabs open; a tab still running a **pre-`c` version (≤v0.9.0)** rewrites the whole single-key
-GM blob in its older format on its next flush, silently dropping fields it doesn't know (`c`). Any
-writer that doesn't OR-merge a field will strip it — this recurs whenever a new field is added and an
-old tab lingers (every `@version` bump leaves old tabs running until reloaded). Operational fix: close
-all YouTube tabs and reopen. Code fix: **mirror the map into the page's `localStorage`** (`lsGet`/`lsSet`,
-same `STORE_KEY`) alongside GM storage. It belongs to the youtube.com **origin, not the script**, so (a)
-it survives the userscript manager resetting GM values on edit, and (b) old script versions have no
-localStorage code so they never strip it — `loadStore()` merges it back and re-seeds GM (`healed`),
-healing a stripped GM copy. `flush()` writes both backends (merging both first); Reset clears both; a
-`window` `'storage'` event folds in cross-tab changes (reliable on Firefox/LibreWolf, unlike GM's
-listener). Caveat: only protects values written by ≥v0.12.0 — data already stripped before the mirror
-existed is gone.
+## Testing with Claude-in-Chrome (screenshots forbidden — user rule)
+- Read state from the page: `localStorage['ywi.watched.v1']` is the mirror. Audit each card: badge
+  count, rendered state (gray rect `rgba(128…`, `hsl` fill width ÷ 40, outline opacity) vs. the
+  stored entry, plus an `elementFromPoint` hit test.
+- Channel pages have a sticky header over the viewport middle: hit-test after
+  `scrollIntoView({block:'end'})`, not `center`. `/playlist` badges need ~2 s+ after load.
+- Disable Open Links in New Tab first (it takes synthetic clicks). The user's autoplay blocker also
+  blocks script-started playback: seeks can be tested (`#movie_player.seekTo`), playback capture can't.
+- Verified 2026-10-02 (v0.27.0): subscriptions (1,202 cards incl. Shorts shelf and multi-author),
+  `/playlist` (500), LL and uploads watch-page panels, watch sidebar incl. the "From <channel>" chip,
+  channel Videos and Shorts tabs, click marking, seek capture, resume bar across reload + click.
+  Not tested: search results (legacy regime), clicked/liked Shorts, playback capture.
 
-## Gotchas (verified live 2026-06-16)
-
-- **Capture is event-driven (v0.3.0, was polling)**: the old `setInterval(samplePlayer, 2000)` only
-  caught the watched position if a 2s tick happened to land at the right moment — it routinely lost
-  seeks-then-SPA-navigate and slider moves with no playback. Now `bindVideo()` attaches listeners to
-  the player's `<video>` (`timeupdate` for playback, `seeking`/`seeked` for manual scrubbing — these
-  fire even while paused / never-played, so dragging the slider past a threshold records immediately),
-  plus `ended`→full. The 2s interval remains only as a safety net + to (re)attach when the `<video>`
-  appears/swaps. Flush triggers: `visibilitychange`(hidden), `pagehide`, `beforeunload`, and crucially
-  **`yt-navigate-start`** (SPA nav away from a video fires none of the first three). Mis-attribution
-  guard: `activeId` (the loaded video's id) is set **only** from the video's own load events
-  (`loadedmetadata`/`durationchange`, when the URL has settled) and cleared on `emptied`, never
-  straight from the URL — so a stray late `timeupdate` from the previous video during a nav can't be
-  filed under the new id. Player `<video>` is found via `#movie_player, #shorts-player`; on a native
-  `/shorts/` page (no redirect) `mainVideo()` falls back to the playing `<video>` in the feed (gated
-  to `/shorts/` so it never grabs a hover-preview elsewhere). **Shorts opened as normal `/watch`**
-  (the user runs a redirect script) capture through the reliable watch path either way.
-- **Flush must be THROTTLED, not debounced (v0.4.0 fix — caused silent data loss on Firefox/LibreWolf)**:
-  `scheduleFlush` was a debounce (`clearTimeout` + reset). Fine with the old 2s polling (2s > 1.5s
-  debounce so it drained), but the event-driven `timeupdate` fires ~4x/s, resetting the 1.5s timer
-  before it ever fires → **nothing persisted to GM storage during continuous playback**; only videos
-  paused/ended for >1.5s (or caught by a teardown flush) were saved. Symptom: export showed a handful
-  of entries despite watching dozens. Fix: throttle — schedule at most one flush per `FLUSH_MS` and
-  let it fire (`if (flushTimer) return;`). Chrome masked it because its teardown flush persisted
-  reliably; Firefox's didn't.
-- **`visibilitychange` listener must be on `document`, not `window`**: Firefox/LibreWolf don't fire it
-  on `window`, so the tab-switch flush was silently skipped there (worked on Chrome). Canonical target
-  is `document`.
-- **Cross-tab GM storage doesn't propagate reliably on Firefox/LibreWolf (v0.5.0)**: with a video tab
-  and an already-open Subscriptions tab, the subs tab kept reading a *stale* blob even after a reload —
-  a freshly-watched video was in storage (the watch tab's reload-dump proved it) yet absent from the
-  subs tab's dump. Diagnostic tell: the whole map is one JSON value under one key, so a single fresh
-  read can't contain one new entry but miss another — divergent dumps ⇒ the tabs hold different copies.
-  Two-part fix: (1) **read-merge-write** in `flush()` (`mergeInto(storage)` before `GM_setValue`) so a
-  stale in-memory copy can never clobber another tab's entries (monotonic max keeps the larger); (2)
-  **`GM_addValueChangeListener`** (`watchStore()`) to fold in remote writes live and re-sweep, so an
-  open tab updates without a manual reload. **Caveat from (1):** the Reset menu command must write `{}`
-  **directly** (not via `flush()`, which would merge the old data straight back). The export command
-  now re-reads storage before dumping so it reflects what's persisted, not just this tab's memory.
-- **Trusted Types**: youtube.com enforces `require-trusted-types-for 'script'`, so
-  `element.innerHTML = '<svg…>'` **throws**. Build all DOM (the SVG icons) with
-  `document.createElementNS` / `replaceChildren`, never innerHTML.
-- **Two DOM regimes, mid-migration** — the script must handle both:
-  - **Legacy polymer** (search results): `ytd-video-renderer` → metadata row is `#metadata-line`
-    with `<span>` children.
-  - **New view-models** (home / subscriptions / channel grids — the primary surface):
-    `yt-lockup-view-model` → metadata is `yt-content-metadata-view-model`; view-count span is
-    `span.ytContentMetadataViewModelMetadataText`.
-  `sweep()` decorates by querying `#metadata-line` AND `yt-content-metadata-view-model`.
-- **Ads share the player element**: during ads `currentTime/duration` refer to the *ad*. Skip
-  sampling when `#movie_player` / `.html5-video-player` has the `ad-showing` class.
-- **Live streams**: `duration` is `Infinity` — guard against non-finite duration.
-- **Icon placement (three paths; avatar path is now mostly dead — verified live 2026-06-22)**:
-  `decorateRow` picks among them in order:
-  1. `placeUnderAvatar` — under the channel avatar, centered, `top:100%` + `AVATAR_GAP`px. Avatar
-     position is fixed regardless of title wrap so the icon doesn't drift on a two-line title. Matches
-     **both** avatar elements: single-author cards use `yt-decorated-avatar-view-model`; **multi-author**
-     cards (e.g. "More Court TV and COURT TV") use a `yt-avatar-stack-view-model` (~32px, same box) —
-     unrecognized (pre-v0.16.0) it fell through to `placeBesideMeta` and the badge landed inline on the
-     author line, pushed down/right vs. the under-avatar pill on single-author cards. **Only taken when
-     the avatar is genuinely rendered** — guarded by `avatar.offsetWidth/Height > 0`. As of 2026-06-22 YouTube **no longer renders a per-video
-     avatar** on channel-grid cards (it's absent) and **collapses it to 0×0** in watch-sidebar
-     recommendation lockups, so this path rarely fires now; the guard is what stops the old code from
-     anchoring an absolutely-positioned badge to a zero-size box (→ badge off in the gutter / at 0,0,
-     invisible — the exact bug reported for channel pages and watch-page recommendations).
-  2. `placeBesideMeta` (**v0.15.0**) — new-regime (`yt-content-metadata-view-model`) cards with no
-     usable avatar: badge sits **inline at the start of the first metadata line** (`:scope > div`),
-     i.e. left of the view count on a channel `/videos` grid, left of the channel name in the watch
-     sidebar. Same inline `inline-flex` look as the Shorts badge; always on-screen, theme-colored.
-  3. `placeInGutter` — legacy list cards with `#metadata-line` (e.g. search results):
-     `left:-GUTTER_OFFSET` of the metadata row.
-  Tunables: `ICON_SIZE`, `AVATAR_GAP`, `GUTTER_OFFSET`, `SHORTS_GAP` (inline gap).
-- **Shorts DOM (verified live 2026-06-16, subscriptions Shorts shelf)**: a third regime. Card is
-  `ytm-shorts-lockup-view-model-v2` which **wraps** an inner `ytm-shorts-lockup-view-model` (older
-  element, still present) — both match, so `decorateShort` normalizes to the outermost via
-  `.closest('…-v2') || .closest('…')` and the badge-exists guard dedupes (verified 1 badge/card after
-  a double sweep). Shorts have **no** `yt-content-metadata-view-model` and **no**
-  `yt-decorated-avatar-view-model`, so neither existing placement applies. Link is
-  `a.reel-item-endpoint[href=/shorts/ID]` (caught by `idFromCard`'s `/shorts/` branch). Title/views are
-  in `.shortsLockupViewModelHostOutsideMetadata`; the view count is the
-  `.shortsLockupViewModelHostOutsideMetadataSubhead` block (gray ~`rgb(170,170,170)`, 14px). **Per user
-  preference the badge sits inline to the LEFT of the view count** (`placeBesideViews` makes that
-  subhead a flex row and prepends the badge, pushing the count right), at `SHORTS_ICON`=18px to match
-  the text, colored to the subhead text color so the ring adapts to theme. (An earlier version overlaid
-  it on the thumbnail top-left; replaced.)
-- **Icon color / `currentColor`**: the empty + half rings use `currentColor`. Inside
-  `yt-decorated-avatar-view-model` that inherits **black** (`rgb(0,0,0)`) → invisible on dark theme.
-  Fix: at decorate time set `badge.style.color` to the card's metadata-text computed color
-  (`.ytContentMetadataViewModelMetadataText`, ~`rgb(170,170,170)` on dark) — adapts to theme.
-  Note `--yt-spec-text-secondary` reads **empty** at `:root` here, so don't rely on it.
-- **False positives**: non-video metadata rows (e.g. the channel header's subscriber line) are also
-  `yt-content-metadata-view-model`. The `idFromCard` guard (requires a `/watch` or `/shorts/` link)
-  rejects them — don't decorate a row without a resolvable video ID.
-- **Selectors drift**: YouTube renames polymer elements / class hashes periodically. The capture/
-  decorate selectors are the brittle part and will need occasional maintenance. Re-inspect live
-  rather than guessing from memory.
-
-## Install gotcha (Chrome MV3)
-
-Recent Chrome (MV3) requires a per-extension **"Allow user scripts"** toggle before Tampermonkey can
-inject *any* userscript. Symptom: the script shows **Enabled** in the Tampermonkey popup but the
-toolbar icon has **no "1" badge** and nothing runs (no console error either). Tampermonkey shows a
-banner "Please enable the `Allow User Scripts` extension setting." Fix: `chrome://extensions` →
-Tampermonkey → **Details** → enable **Allow user scripts** (older Chrome: enable Developer mode),
-then reload the page. Must be done in the *same profile* the script lives in.
-
-## Status
-
-- **Verified live**: new-regime decoration + icon placement + video-ID extraction (30/31 cards on a
-  channel grid; the 1 skip = header row, correct).
-- **Capture rewritten event-driven (v0.3.0), not yet verified in real use**: replaced the 2s polling
-  with `<video>` event listeners + `yt-navigate-start` flush (see the capture gotcha above). Threshold
-  for "full" lowered 0.85→0.50. Test by: (a) seek the slider past ~5% / past ~50% **without playing**
-  and confirm half/full record; (b) play a bit then click straight to another video and confirm the
-  position stuck; (c) confirm an unrelated video isn't falsely marked after navigating away.
-- **Legacy/search regime**: still written against confirmed structure but not separately re-verified.
-- **Shorts decoration (v0.2.0)**: implemented and **verified live** on the subscriptions Shorts shelf
-  — all three states render in the thumbnail top-left and are legible; dedup confirmed. Capture for
-  Shorts now rides the normal `/watch` path (the user's redirect script), which is the reliable route.
-- **Watch-page playlist panel (fourth DOM regime; v0.27.0)** — verified live 2026-07-01: when the
-  current video is part of a playlist, the right-hand "Up next" sidebar becomes an
-  `ytd-playlist-panel-renderer` full of `ytd-playlist-panel-video-renderer` items. Distinct from all
-  three regimes above — no `#metadata-line`, no `yt-content-metadata-view-model`, no avatar — so
-  `sweep()` never queried it and these cards were silently skipped entirely (no error, no console
-  warning — the bug only shows up because the panel only exists for playlist videos). Fix:
-  `decoratePlaylistPanelItem()` targets `#byline-container` (already `display:flex; align-items:center`)
-  and prepends the badge the same way `placeBesideMeta` does. Video ID resolves fine via the existing
-  `a[href*="/watch?v="]` fallback in `idFromCard` (the row's link is `a#wc-endpoint`, not `#thumbnail`/
-  `#video-title-link`) — no change needed there. Click-tracking also already worked here for the same
-  reason: `idFromClick`'s `a[href]` fallback catches `#wc-endpoint` without needing this card type added
-  to its `.closest(...)` list.
+## Install (Chrome MV3)
+Tampermonkey needs its per-extension **Allow user scripts** toggle (chrome://extensions → Tampermonkey
+→ Details). Without it the script shows Enabled but never runs — no badge count, no error.

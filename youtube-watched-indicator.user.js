@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.27.0
+// @version      0.28.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place. Videos in your Liked list that you haven't otherwise touched get a gray-filled pill (backfilled via YouTube's own session API — no API key needed), so you can spot ones you liked before installing.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -35,9 +35,7 @@
   const SHORTS_GAP     = 5;                  // px gap between the Shorts badge and the view count
   const BAR_BG         = 'rgba(128,128,128,0.7)';   // gray fill for a LIKED-but-untouched pill (the liked-backfill indicator); theme-neutral medium gray, opaque enough to read on light + dark
 
-  // Liked-videos backfill: pull your Liked playlist via YouTube's own session API and mark any liked
-  // video NOT already in storage as "clicked" (so videos you watched/liked before install still get the
-  // opened-indicator outline). No Google API key — reuses the page's innertube key + your cookies.
+  // Liked-videos backfill: liked videos not already in storage get `k:1` (gray pill). Uses YouTube's own session API.
   const LIKED_TS_KEY     = 'ywi.liked.fetchedAt';   // GM key: ms timestamp of the last successful backfill
   const LIKED_REFRESH_MS = 24 * 60 * 60 * 1000;     // auto-refresh at most once per 24h (menu command forces it)
   const LIKED_VER_KEY    = 'ywi.liked.logicVer';    // GM key: which backfill-logic version last ran
@@ -648,8 +646,7 @@
   // Calls YouTube's own internal "innertube" browse API for your Liked playlist (browseId VLLL),
   // reusing the page's API key + your session cookies (SAPISIDHASH auth, same as the site). No Google
   // API key and nothing is sent anywhere new — it's a read of your own list, same as opening the page.
-  // Every liked video NOT already in the watched map is created as clicked (c:1, f:0); existing entries
-  // are left untouched, so measured progress / real clicks always win.
+  // Every liked video NOT already in the watched map is created with k:1; existing entries are left untouched.
   // ---------------------------------------------------------------------------
   function getCookie(name) {
     return (document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)')) || [])[1] || '';
@@ -739,18 +736,14 @@
     }
     return ids;
   }
-  function applyLiked(ids) {
+  function applyLiked(ids, heal) {
     let changed = false;
     ids.forEach(id => {
       const e = watched[id];
       // Gap-fill: a liked video with no existing entry gets the `k` (liked) flag -> renders as a gray pill.
       if (!e) { watched[id] = { f: 0, l: 0, t: 0, d: 0, c: 0, k: 1 }; changed = true; return; }
-      // Heal the earlier (v0.17-v0.18) backfill, which mislabeled liked videos as CLICKED (c:1). A bare
-      // click with no real watch data, on a video now confirmed liked, was almost certainly that backfill
-      // -> relabel it liked so it shows gray. Genuinely watched videos (f>0) and clicks carrying real data
-      // are left untouched -> normal rules. (A real pre-fix click on a liked video is indistinguishable
-      // from the backfill, so it flips to gray too — rare and cosmetically minor.)
-      if (e.c && !e.k && !(e.f > 0) && !(e.l > 0) && !e.d) { e.c = 0; e.k = 1; changed = true; }
+      // One-time migration only (heal): relabel v0.17-0.18's bare `c:1` liked marks as `k:1`.
+      if (heal && e.c && !e.k && !(e.f > 0) && !(e.l > 0) && !e.d) { e.c = 0; e.k = 1; changed = true; }
     });
     if (changed) { dirty = true; flush(); scheduleSweep(); }
     return changed;
@@ -760,12 +753,13 @@
     if (likedBusy) return;
     const last = +GM_getValue(LIKED_TS_KEY, 0) || 0;
     const stale = Date.now() - last >= LIKED_REFRESH_MS;
-    const verBumped = +GM_getValue(LIKED_VER_KEY, 0) !== LIKED_VER;            // logic changed -> re-run once
+    const prevVer = +GM_getValue(LIKED_VER_KEY, 0);
+    const verBumped = prevVer !== LIKED_VER;                                   // logic changed -> re-run once
     if (!force && !stale && !verBumped) return;                               // throttle automatic runs
     likedBusy = true;
     try {
       const ids = await fetchLikedIds();
-      const added = applyLiked(ids);
+      const added = applyLiked(ids, prevVer < 2);                              // heal pre-v2 data only, or a real click is erased
       GM_setValue(LIKED_TS_KEY, Date.now());
       GM_setValue(LIKED_VER_KEY, LIKED_VER);
       console.log(`[YWI] liked backfill: ${ids.size} liked videos found, ${added ? 'updated gray-pill marks' : 'no changes'}`);
