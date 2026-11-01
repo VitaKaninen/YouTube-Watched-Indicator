@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Watched Indicator
 // @namespace    https://github.com/azrobbins/YouTube-Watched-Indicator
-// @version      0.28.0
+// @version      0.29.0
 // @description  Local watched-state icons on YouTube thumbnails. Measures how much of each video you watch (no reliance on YouTube watch history) and stores it in Tampermonkey only. A progress bar shows the exact watched fraction (colored red->green); hover for the timestamp; clicked-but-unwatched videos get a brighter outline so you don't re-open them; on the watch page the green fill marks the furthest position and a white marker the last position — click to resume there in place. Videos in your Liked list that you haven't otherwise touched get a gray-filled pill (backfilled via YouTube's own session API — no API key needed), so you can spot ones you liked before installing.
 // @author       VitaKaninen
 // @match        https://www.youtube.com/*
@@ -785,7 +785,7 @@
   // Maintenance helpers in the Tampermonkey menu.
   GM_registerMenuCommand('Mark Liked videos (gray pill) now', () => {
     refreshLiked(true).then(() => console.log('[YWI] liked backfill: done'));
-  });
+  }, { autoClose: false });
   // TEMP DIAGNOSTIC (added v0.20.0 to debug the liked backfill) — remove once confirmed working. Pages
   // through the whole Liked playlist with per-page logging so we can see where the continuation chain
   // breaks, then dumps the final response (the one with no next token) to reveal where YT nests it.
@@ -873,5 +873,5 @@
       // Write empty directly — flush() does a read-merge-write and would fold the old data right back.
       watched = {}; dirty = false; GM_setValue(STORE_KEY, '{}'); lsSet('{}'); GM_setValue(LIKED_TS_KEY, 0); GM_setValue(LIKED_VER_KEY, 0); scheduleSweep();
     }
-  });
+  }, { autoClose: false });
 })();
